@@ -14,7 +14,7 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.example.locallore"
+        applicationId = "com.locallore.app"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
