@@ -13,8 +13,12 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import kotlin.coroutines.resume
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.RequestBody.Companion.toRequestBody
 
 data class NearbyPlace(
     val name: String,
@@ -25,6 +29,32 @@ data class NearbyPlace(
 
 object LocationService {
 
+    suspend fun getCityName(lat: Double, lng: Double): String? = withContext(Dispatchers.IO) {
+        try {
+            val url = "https://nominatim.openstreetmap.org/reverse?lat=$lat&lon=$lng&format=json"
+            val request = Request.Builder()
+                .url(url)
+                .header("User-Agent", "LocalLore/1.0 (Android app; educational project)")
+                .build()
+            val response = OkHttpClient().newCall(request).execute()
+            val body = response.body?.string() ?: return@withContext null
+
+            val json = JSONObject(body)
+            val address = json.getJSONObject("address")
+
+            // Try city first, then town, then state as fallback
+            val city = address.optString("city").ifBlank { null }
+                ?: address.optString("town").ifBlank { null }
+                ?: address.optString("state").ifBlank { null }
+
+            Log.d("LocationService", "Detected city: $city")
+            city
+
+        } catch (e: Exception) {
+            Log.e("LocationService", "Reverse geocode failed", e)
+            null
+        }
+    }
     suspend fun getCurrentLocation(context: Context): Pair<Double, Double>? {
         val hasPermission = ContextCompat.checkSelfPermission(
             context, Manifest.permission.ACCESS_FINE_LOCATION
@@ -66,41 +96,141 @@ object LocationService {
         lng: Double,
         apiKey: String
     ): List<NearbyPlace> = withContext(Dispatchers.IO) {
-        val url = "https://maps.googleapis.com/maps/api/place/nearbysearch/json" +
-                "?location=$lat,$lng" +
-                "&radius=30000" +
-                "&type=tourist_attraction" +
-                "&key=$apiKey"
+        val allPlaces = mutableListOf<NearbyPlace>()
+        var nextPageToken: String? = null
 
+        do {
+            val url = StringBuilder("https://maps.googleapis.com/maps/api/place/nearbysearch/json" +
+                    "?location=$lat,$lng" +
+                    "&radius=30000" +
+                    "&type=tourist_attraction" +
+                    "&key=$apiKey")
+
+            if (nextPageToken != null) {
+                url.append("&pagetoken=$nextPageToken")
+            }
+
+            try {
+                val client = OkHttpClient()
+                val request = Request.Builder().url(url.toString()).build()
+                val response = client.newCall(request).execute()
+                val body = response.body?.string() ?: break
+
+                val json = JSONObject(body)
+                val results = json.getJSONArray("results")
+
+                for (i in 0 until results.length()) {
+                    val place = results.getJSONObject(i)
+                    val location = place.getJSONObject("geometry").getJSONObject("location")
+                    allPlaces.add(
+                        NearbyPlace(
+                            name = place.getString("name"),
+                            placeId = place.getString("place_id"),
+                            lat = location.getDouble("lat"),
+                            lng = location.getDouble("lng")
+                        )
+                    )
+                }
+
+                nextPageToken = if (json.has("next_page_token"))
+                    json.getString("next_page_token") else null
+
+                if (nextPageToken != null) {
+                    kotlinx.coroutines.delay(2000)
+                }
+
+            } catch (e: Exception) {
+                Log.e("LocationService", "Places API call failed", e)
+                break
+            }
+
+        } while (nextPageToken != null)
+
+        Log.d("LocationService", "Found ${allPlaces.size} attractions total")
+        allPlaces
+    }
+
+    fun savePlacesToJson(context: Context, places: List<NearbyPlace>, lat: Double, lng: Double) {
         try {
-            val client = OkHttpClient()
-            val request = Request.Builder().url(url).build()
-            val response = client.newCall(request).execute()
-            val body = response.body?.string() ?: return@withContext emptyList<NearbyPlace>()
-            Log.d("LocationService", "Places API response: $body")
-            val json = JSONObject(body)
-            val results = json.getJSONArray("results")
-            val places = mutableListOf<NearbyPlace>()
+            val jsonArray = JSONArray()
+            for (place in places) {
+                val jsonObject = JSONObject()
+                jsonObject.put("name", place.name)
+                jsonObject.put("placeId", place.placeId)
+                jsonObject.put("lat", place.lat)
+                jsonObject.put("lng", place.lng)
+                jsonArray.put(jsonObject)
+            }
 
-            for (i in 0 until results.length()) {
-                val place = results.getJSONObject(i)
-                val location = place.getJSONObject("geometry").getJSONObject("location")
+            val wrapper = JSONObject()
+            wrapper.put("timestamp", System.currentTimeMillis())
+            wrapper.put("fetchedLat", lat)
+            wrapper.put("fetchedLng", lng)
+            wrapper.put("places", jsonArray)
+
+            val file = File(context.filesDir, "nearby_attractions.json")
+            file.writeText(wrapper.toString(4))
+            Log.d("LocationService", "Saved ${places.size} places to cache")
+        } catch (e: Exception) {
+            Log.e("LocationService", "Failed to save places to JSON", e)
+        }
+    }
+
+    fun loadPlacesFromJson(context: Context, currentLat: Double, currentLng: Double): List<NearbyPlace>? {
+        return try {
+            val file = File(context.filesDir, "nearby_attractions.json")
+            if (!file.exists()) return null
+
+            val wrapper = JSONObject(file.readText())
+            val timestamp = wrapper.getLong("timestamp")
+            val fetchedLat = wrapper.getDouble("fetchedLat")
+            val fetchedLng = wrapper.getDouble("fetchedLng")
+
+            val ageMinutes = (System.currentTimeMillis() - timestamp) / 60000
+            val distanceKm = haversineDistance(currentLat, currentLng, fetchedLat, fetchedLng)
+
+            if (ageMinutes > 30) {
+                Log.d("LocationService", "Cache expired: ${ageMinutes} mins old")
+                return null
+            }
+
+            if (distanceKm > 15) {
+                Log.d("LocationService", "Cache expired: moved ${distanceKm}km")
+                return null
+            }
+
+            val jsonArray = wrapper.getJSONArray("places")
+            val places = mutableListOf<NearbyPlace>()
+            for (i in 0 until jsonArray.length()) {
+                val obj = jsonArray.getJSONObject(i)
                 places.add(
                     NearbyPlace(
-                        name = place.getString("name"),
-                        placeId = place.getString("place_id"),
-                        lat = location.getDouble("lat"),
-                        lng = location.getDouble("lng")
+                        name = obj.getString("name"),
+                        placeId = obj.getString("placeId"),
+                        lat = obj.getDouble("lat"),
+                        lng = obj.getDouble("lng")
                     )
                 )
             }
-            Log.d("LocationService", "Using API key: $apiKey")
-            Log.d("LocationService", "Found ${places.size} attractions")
+
+            Log.d("LocationService", "Cache valid: ${ageMinutes} mins old, ${distanceKm}km away. Loaded ${places.size} places")
             places
 
         } catch (e: Exception) {
-            Log.e("LocationService", "Places API call failed", e)
-            emptyList<NearbyPlace>()
+            Log.e("LocationService", "Failed to load places from cache", e)
+            null
         }
+    }
+
+    // Calculates distance between two coordinates in km
+    private fun haversineDistance(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Double {
+        val R = 6371.0 // Earth's radius in km
+        val dLat = Math.toRadians(lat2 - lat1)
+        val dLng = Math.toRadians(lng2 - lng1)
+        val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
+                Math.sin(dLng / 2) * Math.sin(dLng / 2)
+        val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+        return R * c
     }
 }
