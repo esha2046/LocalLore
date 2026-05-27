@@ -24,7 +24,17 @@ data class NearbyPlace(
     val name: String,
     val placeId: String,
     val lat: Double,
-    val lng: Double
+    val lng: Double,
+    val rating: Double,
+    val userRatingsTotal: Int,
+    val vicinity: String,
+    val openNow: Boolean?,
+    val photoReference: String?,
+    val businessStatus: String,
+    val viewportNortheastLat: Double?,
+    val viewportNortheastLng: Double?,
+    val viewportSouthwestLat: Double?,
+    val viewportSouthwestLng: Double?
 )
 
 object LocationService {
@@ -102,7 +112,7 @@ object LocationService {
         do {
             val url = StringBuilder("https://maps.googleapis.com/maps/api/place/nearbysearch/json" +
                     "?location=$lat,$lng" +
-                    "&radius=30000" +
+                    "&radius=20000" +
                     "&type=tourist_attraction" +
                     "&key=$apiKey")
 
@@ -115,19 +125,71 @@ object LocationService {
                 val request = Request.Builder().url(url.toString()).build()
                 val response = client.newCall(request).execute()
                 val body = response.body?.string() ?: break
-
                 val json = JSONObject(body)
                 val results = json.getJSONArray("results")
+                val blacklistKeywords = listOf(
+                    "service", "services", "hotel", "hotels", "tour", "tours", "travels",
+                    "travel", "agency", "cab", "taxi", "cargo", "lodge",
+                    "lodging", "resort", "inn", "hostel", "motel", "guesthouse", "guest house",
+                    "restaurant", "cafe", "dhaba", "caterers",
+                    "hospital", "clinic", "pharmacy", "school", "college", "academy", "coaching", "classes", "shop", "store",
+                    "showroom", "dealership", "garage", "workshop", "salon", "spa",
+                    "gym", "fitness", "bank", "atm", "insurance", "finance", "realty",
+                    "real estate", "builders", "construction", "packers", "movers", "holidays",
+                    "voyages", "driver", "drivers", "Estate", "Office", "Motors", "Motor"
+                )
 
                 for (i in 0 until results.length()) {
                     val place = results.getJSONObject(i)
                     val location = place.getJSONObject("geometry").getJSONObject("location")
+                    val name = place.getString("name")
+                    val viewport = place.getJSONObject("geometry").optJSONObject("viewport")
+                    val northeastLat = viewport?.getJSONObject("northeast")?.optDouble("lat")
+                    val northeastLng = viewport?.getJSONObject("northeast")?.optDouble("lng")
+                    val southwestLat = viewport?.getJSONObject("southwest")?.optDouble("lat")
+                    val southwestLng = viewport?.getJSONObject("southwest")?.optDouble("lng")
+
+                    // Skip permanently closed places
+                    val businessStatus = place.optString("business_status", "OPERATIONAL")
+                    if (businessStatus == "CLOSED_PERMANENTLY") {
+                        Log.d("LocationService", "Skipping permanently closed: $name")
+                        continue
+                    }
+
+                    // Keyword filter
+                    val nameLower = name.lowercase()
+                    val isBlacklisted = blacklistKeywords.any { keyword ->
+                        val regex = Regex("\\b${Regex.escape(keyword)}\\b", RegexOption.IGNORE_CASE)
+                        val matches = regex.containsMatchIn(nameLower)
+                        if (matches) Log.d("LocationService", "Filtered '$name' because of keyword: '$keyword'")
+                        matches
+                    }
+                    if (isBlacklisted) continue
+
+                    val openNow = if (place.has("opening_hours"))
+                        place.getJSONObject("opening_hours").optBoolean("open_now", false)
+                    else null
+
+                    val photoReference = if (place.has("photos"))
+                        place.getJSONArray("photos").getJSONObject(0).optString("photo_reference")
+                    else null
+
                     allPlaces.add(
                         NearbyPlace(
-                            name = place.getString("name"),
+                            name = name,
                             placeId = place.getString("place_id"),
                             lat = location.getDouble("lat"),
-                            lng = location.getDouble("lng")
+                            lng = location.getDouble("lng"),
+                            rating = place.optDouble("rating", 0.0),
+                            userRatingsTotal = place.optInt("user_ratings_total", 0),
+                            vicinity = place.optString("vicinity", ""),
+                            openNow = openNow,
+                            photoReference = photoReference,
+                            businessStatus = businessStatus,
+                            viewportNortheastLat = northeastLat,
+                            viewportNortheastLng = northeastLng,
+                            viewportSouthwestLat = southwestLat,
+                            viewportSouthwestLng = southwestLng
                         )
                     )
                 }
@@ -150,7 +212,7 @@ object LocationService {
         allPlaces
     }
 
-    fun savePlacesToJson(context: Context, places: List<NearbyPlace>, lat: Double, lng: Double) {
+    fun savePlacesToJson(context: Context, places: List<NearbyPlace>, lat: Double, lng: Double, cityName: String? = null) {
         try {
             val jsonArray = JSONArray()
             for (place in places) {
@@ -159,6 +221,16 @@ object LocationService {
                 jsonObject.put("placeId", place.placeId)
                 jsonObject.put("lat", place.lat)
                 jsonObject.put("lng", place.lng)
+                jsonObject.put("rating", place.rating)
+                jsonObject.put("userRatingsTotal", place.userRatingsTotal)
+                jsonObject.put("vicinity", place.vicinity)
+                jsonObject.put("openNow", place.openNow)
+                jsonObject.put("photoReference", place.photoReference ?: "")
+                jsonObject.put("businessStatus", place.businessStatus)
+                jsonObject.put("viewportNELat", place.viewportNortheastLat ?: "")
+                jsonObject.put("viewportNELng", place.viewportNortheastLng ?: "")
+                jsonObject.put("viewportSWLat", place.viewportSouthwestLat ?: "")
+                jsonObject.put("viewportSWLng", place.viewportSouthwestLng ?: "")
                 jsonArray.put(jsonObject)
             }
 
@@ -167,6 +239,7 @@ object LocationService {
             wrapper.put("fetchedLat", lat)
             wrapper.put("fetchedLng", lng)
             wrapper.put("places", jsonArray)
+            wrapper.put("cityName", cityName ?: "")
 
             val file = File(context.filesDir, "nearby_attractions.json")
             file.writeText(wrapper.toString(4))
@@ -174,6 +247,24 @@ object LocationService {
         } catch (e: Exception) {
             Log.e("LocationService", "Failed to save places to JSON", e)
         }
+    }
+
+    fun clearAllCaches(context: Context) {
+        val filesToDelete = listOf(
+            "nearby_attractions.json",
+            "enriched_places.json",
+            "wikipedia_progress.json"
+        )
+        filesToDelete.forEach { fileName ->
+            val file = File(context.filesDir, fileName)
+            if (file.exists()) {
+                if (file.delete()) {
+                    Log.d("LocationService", "Deleted cache file: $fileName")
+                }
+            }
+        }
+        // Also remove active geofences from the system so they don't persist
+        GeofenceManager.removeAll(context)
     }
 
     fun loadPlacesFromJson(context: Context, currentLat: Double, currentLng: Double): List<NearbyPlace>? {
@@ -189,13 +280,15 @@ object LocationService {
             val ageMinutes = (System.currentTimeMillis() - timestamp) / 60000
             val distanceKm = haversineDistance(currentLat, currentLng, fetchedLat, fetchedLng)
 
-            if (ageMinutes > 30) {
-                Log.d("LocationService", "Cache expired: ${ageMinutes} mins old")
+            if (ageMinutes > 45) {
+                Log.d("LocationService", "Cache expired: ${ageMinutes} mins old. Clearing all.")
+                clearAllCaches(context)
                 return null
             }
 
             if (distanceKm > 15) {
-                Log.d("LocationService", "Cache expired: moved ${distanceKm}km")
+                Log.d("LocationService", "Cache expired: moved ${distanceKm}km. Clearing all.")
+                clearAllCaches(context)
                 return null
             }
 
@@ -208,7 +301,17 @@ object LocationService {
                         name = obj.getString("name"),
                         placeId = obj.getString("placeId"),
                         lat = obj.getDouble("lat"),
-                        lng = obj.getDouble("lng")
+                        lng = obj.getDouble("lng"),
+                        rating = obj.optDouble("rating", 0.0),
+                        userRatingsTotal = obj.optInt("userRatingsTotal", 0),
+                        vicinity = obj.optString("vicinity", ""),
+                        openNow = if (obj.isNull("openNow")) null else obj.optBoolean("openNow"),
+                        photoReference = obj.optString("photoReference").ifBlank { null },
+                        businessStatus = obj.optString("businessStatus", "OPERATIONAL") ,
+                        viewportNortheastLat = if (obj.isNull("viewportNELat")) null else obj.optDouble("viewportNELat"),
+                        viewportNortheastLng = if (obj.isNull("viewportNELng")) null else obj.optDouble("viewportNELng"),
+                        viewportSouthwestLat = if (obj.isNull("viewportSWLat")) null else obj.optDouble("viewportSWLat"),
+                        viewportSouthwestLng = if (obj.isNull("viewportSWLng")) null else obj.optDouble("viewportSWLng")
                     )
                 )
             }

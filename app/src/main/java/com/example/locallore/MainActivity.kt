@@ -14,6 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.tooling.preview.Preview
 import com.example.locallore.ui.theme.LocalLoreTheme
 import com.google.firebase.auth.FirebaseAuth
+import androidx.work.WorkManager
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -86,6 +87,15 @@ fun MainScreen(context: android.content.Context, modifier: Modifier = Modifier) 
             if (cached != null) {
                 fetchedPlaces = cached
                 statusText = "Loaded ${cached.size} places from cache!"
+                
+                // Automatically resume Geofences on app start if cache exists
+                val wikiCache = withContext(Dispatchers.IO) {
+                    WikipediaService.loadFromCache(context)
+                }
+                if (wikiCache != null) {
+                    GeofenceManager.registerAll(context, wikiCache, lat, lng)
+                    Log.d("LocalLore", "Geofences resumed on start from cache")
+                }
             }
         }
     }
@@ -95,11 +105,23 @@ fun MainScreen(context: android.content.Context, modifier: Modifier = Modifier) 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        val granted = permissions.entries.all { it.value }
-        if (granted) {
-            statusText = "Permissions granted! Click again to search."
+        val fineGranted = permissions[android.Manifest.permission.ACCESS_FINE_LOCATION] ?: false
+        val coarseGranted = permissions[android.Manifest.permission.ACCESS_COARSE_LOCATION] ?: false
+
+        if (fineGranted && coarseGranted) {
+            statusText = "Foreground location granted!"
         } else {
-            statusText = "Location permission denied."
+            statusText = "Basic location permissions denied."
+        }
+    }
+
+    val backgroundPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            statusText = "Background location active! Geofences ready."
+        } else {
+            statusText = "Background location denied. Geofencing will only work while app is open."
         }
     }
 
@@ -110,13 +132,11 @@ fun MainScreen(context: android.content.Context, modifier: Modifier = Modifier) 
             Button(onClick = {
                 scope.launch {
                     withContext(Dispatchers.IO) {
-                        val file = java.io.File(context.filesDir, "nearby_attractions.json")
-                        val enrichedFile = java.io.File(context.filesDir, "enriched_places.json")
-                        if (file.exists()) file.delete()
-                        if (enrichedFile.exists()) enrichedFile.delete()
+                        LocationService.clearAllCaches(context)
+                        WorkManager.getInstance(context).cancelAllWork()
                     }
                     fetchedPlaces = emptyList()
-                    statusText = "Cache cleared! Press Fetch to refresh."
+                    statusText = "All caches cleared! Press Fetch to refresh."
                     Log.d("LocalLore", "Cache manually cleared 🗑️")
                 }
             }) {
@@ -131,8 +151,20 @@ fun MainScreen(context: android.content.Context, modifier: Modifier = Modifier) 
                 val hasCoarseLocation = androidx.core.content.ContextCompat.checkSelfPermission(
                     context, android.Manifest.permission.ACCESS_COARSE_LOCATION
                 ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                
+                val hasBackground = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                    androidx.core.content.ContextCompat.checkSelfPermission(
+                        context, android.Manifest.permission.ACCESS_BACKGROUND_LOCATION
+                    ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                } else true
 
                 if (hasFineLocation && hasCoarseLocation) {
+                    if (!hasBackground && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                        statusText = "Requesting Background Location..."
+                        backgroundPermissionLauncher.launch(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                        return@Button
+                    }
+                    
                     statusText = "Checking cache..."
                     scope.launch {
                         val location = LocationService.getCurrentLocation(context)
@@ -142,7 +174,7 @@ fun MainScreen(context: android.content.Context, modifier: Modifier = Modifier) 
                         }
                         val (lat, lng) = location
                         cityName = LocationService.getCityName(lat, lng)
-                        // Try cache first, passing current location
+
                         val cached = withContext(Dispatchers.IO) {
                             LocationService.loadPlacesFromJson(context, lat, lng)
                         }
@@ -155,19 +187,37 @@ fun MainScreen(context: android.content.Context, modifier: Modifier = Modifier) 
                             val places = LocationService.getNearbyAttractions(lat, lng, apiKey)
                             fetchedPlaces = places
                             withContext(Dispatchers.IO) {
-                                LocationService.savePlacesToJson(context, places, lat, lng)
+                                LocationService.savePlacesToJson(context, places, lat, lng, cityName)
                             }
-                            statusText = "Found ${places.size} attractions! Now press Enrich."
-                            places.forEach { Log.d("LocalLore", "Place: ${it.name}") }
+                            WikipediaWorker.schedule(context)
+                            statusText = "Found ${places.size} attractions! Enriching in background..."
+                        }
+
+                        // Register geofences with whatever Wikipedia data we have so far
+                        val currentCache = withContext(Dispatchers.IO) {
+                            WikipediaService.loadFromCache(context)
+                        }
+                        if (currentCache != null) {
+                            GeofenceManager.registerAll(context, currentCache, lat, lng)
+                            statusText = "Geofences active ✅"
+                        } else {
+                            val tempResult = EnrichmentResult(
+                                enriched = emptyList(),
+                                unenriched = fetchedPlaces
+                            )
+                            GeofenceManager.registerAll(context, tempResult, lat, lng)
+                            statusText = "Geofences active, enriching in background..."
                         }
                     }
                 } else {
-                    permissionLauncher.launch(
-                        arrayOf(
-                            android.Manifest.permission.ACCESS_FINE_LOCATION,
-                            android.Manifest.permission.ACCESS_COARSE_LOCATION
-                        )
+                    val permissions = mutableListOf(
+                        android.Manifest.permission.ACCESS_FINE_LOCATION,
+                        android.Manifest.permission.ACCESS_COARSE_LOCATION
                     )
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                        permissions.add(android.Manifest.permission.POST_NOTIFICATIONS)
+                    }
+                    permissionLauncher.launch(permissions.toTypedArray())
                 }
             }) {
                 Text(statusText)
@@ -179,16 +229,57 @@ fun MainScreen(context: android.content.Context, modifier: Modifier = Modifier) 
                     statusText = "Fetch locations first!"
                     return@Button
                 }
-                statusText = "Fetching Wikipedia data..."
+                statusText = "Checking Wikipedia cache..."
                 scope.launch {
-                    val enriched = WikipediaService.enrichAndFilter(fetchedPlaces, cityName)
-                    statusText = "Done! ${enriched.size} real attractions out of ${fetchedPlaces.size}"
-                    enriched.forEach {
-                        Log.d("LocalLore", "✅ ${it.name}: ${it.wikipediaSummary.take(100)}...")
+                    val cached = withContext(Dispatchers.IO) {
+                        WikipediaService.loadFromCache(context)
+                    }
+                    if (cached != null) {
+                        // FIX: Even if loaded from cache, ensure Geofences are active
+                        val location = LocationService.getCurrentLocation(context)
+                        if (location != null) {
+                            GeofenceManager.registerAll(context, cached, location.first, location.second)
+                            statusText = "Loaded from cache! Geofences active ✅"
+                        } else {
+                            statusText = "Loaded from cache, but location unavailable for geofences."
+                        }
+                        Log.d("LocalLore", "Enriched: ${cached.enriched.size}, Unenriched: ${cached.unenriched.size}")
+                    } else {
+                        statusText = "Fetching Wikipedia data..."
+                        val result = WikipediaService.enrichAndFilter(fetchedPlaces, cityName)
+                        withContext(Dispatchers.IO) {
+                            WikipediaService.saveToCache(context, result)
+                        }
+
+                        // Set up POIs immediately after enrichment
+                        val location = LocationService.getCurrentLocation(context)
+                        if (location != null) {
+                            GeofenceManager.registerAll(context, result, location.first, location.second)
+                            statusText = "Done! ${result.enriched.size} enriched. Geofences updated ✅"
+                        } else {
+                            statusText = "Enriched, but location unavailable for geofences."
+                        }
+
+                        result.enriched.forEach {
+                            Log.d("LocalLore", "✅ ${it.name}: ${it.wikipediaSummary.take(100)}...")
+                        }
+                        result.unenriched.forEach {
+                            Log.d("LocalLore", "📍 ${it.name} (no Wikipedia)")
+                        }
                     }
                 }
             }) {
                 Text("Enrich with Wikipedia")
+            }
+
+            // For stopping the background processes
+            Button(onClick = {
+                WikipediaWorker.cancel(context)
+                WorkManager.getInstance(context).cancelAllWork()
+                statusText = "Background work cancelled"
+                Log.d("LocalLore", "All WorkManager jobs cancelled")
+            }) {
+                Text("Stop Background Work")
             }
         }
     }
