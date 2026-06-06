@@ -212,10 +212,18 @@ object LocationService {
         allPlaces
     }
 
-    fun savePlacesToJson(context: Context, places: List<NearbyPlace>, lat: Double, lng: Double, cityName: String? = null) {
+    fun savePlacesToJson(context: Context, newPlaces: List<NearbyPlace>, lat: Double, lng: Double, cityName: String? = null) {
         try {
+            // Load existing places to merge
+            val existingPlaces = loadPlacesFromJson(context, lat, lng) ?: emptyList()
+            val existingPlaceIds = existingPlaces.map { it.placeId }.toSet()
+            
+            // Keep existing ones, add new ones that aren't already there
+            val mergedPlaces = existingPlaces.toMutableList()
+            newPlaces.forEach { if (it.placeId !in existingPlaceIds) mergedPlaces.add(it) }
+
             val jsonArray = JSONArray()
-            for (place in places) {
+            for (place in mergedPlaces) {
                 val jsonObject = JSONObject()
                 jsonObject.put("name", place.name)
                 jsonObject.put("placeId", place.placeId)
@@ -243,7 +251,7 @@ object LocationService {
 
             val file = File(context.filesDir, "nearby_attractions.json")
             file.writeText(wrapper.toString(4))
-            Log.d("LocationService", "Saved ${places.size} places to cache")
+            Log.d("LocationService", "Saved ${mergedPlaces.size} total places to cache (merged ${newPlaces.size} new)")
         } catch (e: Exception) {
             Log.e("LocationService", "Failed to save places to JSON", e)
         }

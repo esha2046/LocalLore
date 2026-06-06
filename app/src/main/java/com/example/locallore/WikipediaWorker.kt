@@ -63,10 +63,17 @@ class WikipediaWorker(
 
                 // Skip already processed
                 if (placeId in processedIds) continue
+                
+                // NEW: Skip if already present in enriched cache (from previous runs)
+                if (enriched.any { it.placeId == placeId }) {
+                    Log.d("WikipediaWorker", "Skipping ${obj.getString("name")}, already enriched in cache")
+                    processedIds.add(placeId)
+                    continue
+                }
 
                 // Batching logic: after every 6 attempts in this session, cool down
                 if (processedInThisSession > 0 && processedInThisSession % batchSize == 0) {
-                    Log.d("WikipediaWorker", "Batch limit ($batchSize) reached. Cooling down for 10s...")
+                    Log.d("WikipediaWorker", "Batch limit ($batchSize) reached. Cooling down for 5s...")
                     delay(5000)
                 }
 
@@ -113,7 +120,7 @@ class WikipediaWorker(
                 )
 
                 // Individual request delay
-                delay(8000)
+                delay(500)
             }
 
             // All done — delete progress file
@@ -141,7 +148,7 @@ class WikipediaWorker(
         cityName: String?
     ): EnrichedPlace? {
         val queryWithCity = if (cityName != null) "${place.name} $cityName" else place.name
-        val retryDelays = listOf(0L, 5000L, 10000L)
+        val retryDelays = listOf(0L, 3000L, 10000L)
 
         for (delayMs in retryDelays) {
             if (delayMs > 0) {

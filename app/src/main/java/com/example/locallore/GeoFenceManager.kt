@@ -19,8 +19,10 @@ import kotlin.math.min
 object GeofenceManager {
 
     private const val BOUNDARY_GEOFENCE_ID = "BOUNDARY_GEOFENCE"
-    private const val BOUNDARY_RADIUS_METERS = 15000f // 15km boundary
-    private const val MIN_RADIUS_METERS = 250f // Increased further for better emulator detection
+    private const val BOUNDARY_RADIUS_METERS = 5000f // 5km refresh boundary
+    private const val SCAN_RADIUS_METERS = 7000.0 // 7km scanning radius
+    private const val MAX_GEOFENCES = 40 // Capping at 40 POIs
+    private const val MIN_RADIUS_METERS = 250f 
     private const val MAX_RADIUS_METERS = 600f
     private const val DEFAULT_RADIUS_METERS = 300f
 
@@ -100,38 +102,42 @@ object GeofenceManager {
 
         val geofenceList = mutableListOf<Pair<Geofence, Double>>()
 
-        // Add enriched
+        // Add enriched within SCAN_RADIUS
         result.enriched.forEach { place ->
-            val radius = calculateRadius(place)
             val dist = haversineDistance(currentLat, currentLng, place.lat, place.lng)
-            val g = Geofence.Builder()
-                .setRequestId(place.placeId)
-                .setCircularRegion(place.lat, place.lng, radius)
-                .setExpirationDuration(Geofence.NEVER_EXPIRE)
-                .setTransitionTypes(Geofence.GEOFENCE_TRANSITION_ENTER or Geofence.GEOFENCE_TRANSITION_DWELL)
-                .setLoiteringDelay(5000) // 5 seconds
-                .build()
-            geofenceList.add(g to dist)
+            if (dist * 1000 <= SCAN_RADIUS_METERS) {
+                val radius = calculateRadius(place)
+                val g = Geofence.Builder()
+                    .setRequestId(place.placeId)
+                    .setCircularRegion(place.lat, place.lng, radius)
+                    .setExpirationDuration(Geofence.NEVER_EXPIRE)
+                    .setTransitionTypes(Geofence.GEOFENCE_TRANSITION_ENTER or Geofence.GEOFENCE_TRANSITION_DWELL)
+                    .setLoiteringDelay(5000)
+                    .build()
+                geofenceList.add(g to dist)
+            }
         }
 
-        // Add unenriched
+        // Add unenriched within SCAN_RADIUS
         result.unenriched.forEach { place ->
-            val radius = calculateRadius(place)
             val dist = haversineDistance(currentLat, currentLng, place.lat, place.lng)
-            val g = Geofence.Builder()
-                .setRequestId(place.placeId)
-                .setCircularRegion(place.lat, place.lng, radius)
-                .setExpirationDuration(Geofence.NEVER_EXPIRE)
-                .setTransitionTypes(Geofence.GEOFENCE_TRANSITION_ENTER or Geofence.GEOFENCE_TRANSITION_DWELL)
-                .setLoiteringDelay(5000) // 5 seconds
-                .build()
-            geofenceList.add(g to dist)
+            if (dist * 1000 <= SCAN_RADIUS_METERS) {
+                val radius = calculateRadius(place)
+                val g = Geofence.Builder()
+                    .setRequestId(place.placeId)
+                    .setCircularRegion(place.lat, place.lng, radius)
+                    .setExpirationDuration(Geofence.NEVER_EXPIRE)
+                    .setTransitionTypes(Geofence.GEOFENCE_TRANSITION_ENTER or Geofence.GEOFENCE_TRANSITION_DWELL)
+                    .setLoiteringDelay(5000)
+                    .build()
+                geofenceList.add(g to dist)
+            }
         }
 
-        // Take 20 closest + 1 boundary
+        // Take top closest up to MAX_GEOFENCES
         val finalGeofences = geofenceList
             .sortedBy { it.second }
-            .take(20)
+            .take(MAX_GEOFENCES)
             .map { it.first }
             .toMutableList()
 
@@ -143,6 +149,10 @@ object GeofenceManager {
                 .setTransitionTypes(Geofence.GEOFENCE_TRANSITION_EXIT)
                 .build()
         )
+
+        Log.d("GeofenceManager", "Registering ${finalGeofences.size} geofences (Radius: 7km, Limit: $MAX_GEOFENCES, Trigger: 5km)")
+
+        if (finalGeofences.isEmpty()) return@withContext
 
         val request = GeofencingRequest.Builder()
             .setInitialTrigger(GeofencingRequest.INITIAL_TRIGGER_ENTER or GeofencingRequest.INITIAL_TRIGGER_DWELL)

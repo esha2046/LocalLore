@@ -41,6 +41,7 @@ data class EnrichmentResult(
 object WikipediaService {
 
     private val client = OkHttpClient()
+    private const val USER_AGENT = "LocalLore/1.0 (com.example.locallore; locallore@example.com)"
 
     suspend fun enrichAndFilter(
         places: List<NearbyPlace>,
@@ -122,7 +123,7 @@ object WikipediaService {
         val url = "https://en.wikipedia.org/api/rest_v1/page/summary/$encoded"
         val request = Request.Builder()
             .url(url)
-            .header("User-Agent", "LocalLore/1.0 (Android app; educational project)")
+            .header("User-Agent", USER_AGENT)
             .build()
         val response = client.newCall(request).execute()
         val body = response.body?.string() ?: return@withContext null
@@ -149,7 +150,7 @@ object WikipediaService {
 
         val request = Request.Builder()
             .url(searchUrl)
-            .header("User-Agent", "LocalLore/1.0 (Android app; educational project)")
+            .header("User-Agent", USER_AGENT)
             .build()
         val response = client.newCall(request).execute()
         val body = response.body?.string() ?: return@withContext null
