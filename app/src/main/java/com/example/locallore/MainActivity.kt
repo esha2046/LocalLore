@@ -23,11 +23,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.work.WorkManager
+import coil.compose.AsyncImage
 import com.example.locallore.ui.theme.LocalLoreTheme
 import com.google.firebase.auth.FirebaseAuth
 import kotlinx.coroutines.CoroutineScope
@@ -185,6 +187,7 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
                         PlaceItem(
                             place = place,
                             summary = enrichedMap[place.placeId],
+                            apiKey = apiKey,
                             onClick = { summary ->
                                 selectedPlaceSummary = place.name to (summary ?: "No Wikipedia summary available for this location yet.")
                             }
@@ -301,60 +304,72 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun PlaceItem(place: NearbyPlace, summary: String?, onClick: (String?) -> Unit) {
+fun PlaceItem(place: NearbyPlace, summary: String?, apiKey: String, onClick: (String?) -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         onClick = { onClick(summary) }
     ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(place.name, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                    if (summary != null) {
+        Column {
+            if (place.photoReference != null) {
+                AsyncImage(
+                    model = "https://maps.googleapis.com/maps/api/place/photo?maxwidth=800&photo_reference=${place.photoReference}&key=$apiKey",
+                    contentDescription = "Photo of ${place.name}",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(180.dp),
+                    contentScale = ContentScale.Crop
+                )
+            }
+            Row(
+                modifier = Modifier.padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(place.name, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                        if (summary != null) {
+                            Icon(
+                                Icons.Default.AutoFixHigh,
+                                contentDescription = "Enriched",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                    Text(
+                        place.vicinity,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            Icons.Default.AutoFixHigh,
-                            contentDescription = "Enriched",
+                            Icons.Default.Star,
+                            contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(16.dp)
                         )
-                    }
-                }
-                Text(
-                    place.vicinity,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Default.Star,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Text(
-                        " ${place.rating} (${place.userRatingsTotal} reviews)",
-                        style = MaterialTheme.typography.labelSmall
-                    )
-                    if (place.openNow == true) {
-                        Spacer(modifier = Modifier.width(12.dp))
                         Text(
-                            "OPEN NOW",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = androidx.compose.ui.graphics.Color(0xFF4CAF50)
+                            " ${place.rating} (${place.userRatingsTotal} reviews)",
+                            style = MaterialTheme.typography.labelSmall
                         )
+                        if (place.openNow == true) {
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                "OPEN NOW",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = androidx.compose.ui.graphics.Color(0xFF4CAF50)
+                            )
+                        }
                     }
                 }
+                Icon(
+                    Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.outline
+                )
             }
-            Icon(
-                Icons.Default.ChevronRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.outline
-            )
         }
     }
 }
