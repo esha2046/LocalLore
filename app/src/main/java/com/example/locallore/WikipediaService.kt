@@ -268,7 +268,7 @@ object WikipediaService {
             val timestamp = wrapper.getLong("timestamp")
             val ageMinutes = (System.currentTimeMillis() - timestamp) / 60000
 
-            if (ageMinutes > 30) {
+            if (ageMinutes > 60) {
                 Log.d("WikipediaService", "Cache expired: ${ageMinutes} mins old")
                 return null
             }

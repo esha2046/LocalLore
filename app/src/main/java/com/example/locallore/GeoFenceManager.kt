@@ -19,12 +19,12 @@ import kotlin.math.min
 object GeofenceManager {
 
     private const val BOUNDARY_GEOFENCE_ID = "BOUNDARY_GEOFENCE"
-    private const val BOUNDARY_RADIUS_METERS = 5000f // 5km refresh boundary
+    private const val BOUNDARY_RADIUS_METERS = 3000f // 3km boundary
     private const val SCAN_RADIUS_METERS = 7000.0 // 7km scanning radius
     private const val MAX_GEOFENCES = 40 // Capping at 40 POIs
-    private const val MIN_RADIUS_METERS = 250f 
+    private const val MIN_RADIUS_METERS = 350f 
     private const val MAX_RADIUS_METERS = 600f
-    private const val DEFAULT_RADIUS_METERS = 300f
+    private const val DEFAULT_RADIUS_METERS = 400f
 
     private fun getGeofencingClient(context: Context): GeofencingClient {
         return LocationServices.getGeofencingClient(context)
@@ -33,9 +33,7 @@ object GeofenceManager {
     private fun getPendingIntent(context: Context): PendingIntent {
         val intent = Intent(context, GeofenceBroadcastReceiver::class.java)
         return PendingIntent.getBroadcast(
-            context,
-            0,
-            intent,
+            context, 0, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE
         )
     }
@@ -45,29 +43,9 @@ object GeofenceManager {
         val neLng = place.viewportNortheastLng
         val swLat = place.viewportSouthwestLat
         val swLng = place.viewportSouthwestLng
-
-        if (neLat == null || neLng == null || swLat == null || swLng == null) {
-            return DEFAULT_RADIUS_METERS
-        }
-
+        if (neLat == null || neLng == null || swLat == null || swLng == null) return DEFAULT_RADIUS_METERS
         val distanceKm = haversineDistance(neLat, neLng, swLat, swLng)
-        val radiusMeters = (distanceKm * 1000 / 2).toFloat()
-        return max(MIN_RADIUS_METERS, min(MAX_RADIUS_METERS, radiusMeters))
-    }
-
-    private fun calculateRadius(place: EnrichedPlace): Float {
-        val neLat = place.viewportNortheastLat
-        val neLng = place.viewportNortheastLng
-        val swLat = place.viewportSouthwestLat
-        val swLng = place.viewportSouthwestLng
-
-        if (neLat == null || neLng == null || swLat == null || swLng == null) {
-            return DEFAULT_RADIUS_METERS
-        }
-
-        val distanceKm = haversineDistance(neLat, neLng, swLat, swLng)
-        val radiusMeters = (distanceKm * 1000 / 2).toFloat()
-        return max(MIN_RADIUS_METERS, min(MAX_RADIUS_METERS, radiusMeters))
+        return max(MIN_RADIUS_METERS, min(MAX_RADIUS_METERS, (distanceKm * 1000 / 2).toFloat()))
     }
 
     private fun haversineDistance(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Double {
@@ -77,33 +55,26 @@ object GeofenceManager {
         val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
                 Math.cos(Math.toRadians(lat1)) * Math.cos(Math.toRadians(lat2)) *
                 Math.sin(dLng / 2) * Math.sin(dLng / 2)
-        val c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
-        return R * c
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
     }
 
     suspend fun registerAll(
         context: Context,
-        result: EnrichmentResult,
+        places: List<NearbyPlace>,
         currentLat: Double,
         currentLng: Double
     ) = withContext(Dispatchers.IO) {
-        val hasPermission = ContextCompat.checkSelfPermission(
-            context, Manifest.permission.ACCESS_FINE_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
+        val hasPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val hasBgPermission = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED
 
-        val hasBackgroundPermission = ContextCompat.checkSelfPermission(
-            context, Manifest.permission.ACCESS_BACKGROUND_LOCATION
-        ) == PackageManager.PERMISSION_GRANTED
-
-        if (!hasPermission || !hasBackgroundPermission) {
-            Log.e("GeofenceManager", "Missing permissions: Fine=$hasPermission, Background=$hasBackgroundPermission")
+        if (!hasPermission || !hasBgPermission) {
+            DebugLogger.log(context, "Permissions missing for geofencing")
             return@withContext
         }
 
         val geofenceList = mutableListOf<Pair<Geofence, Double>>()
 
-        // Add enriched within SCAN_RADIUS
-        result.enriched.forEach { place ->
+        places.forEach { place ->
             val dist = haversineDistance(currentLat, currentLng, place.lat, place.lng)
             if (dist * 1000 <= SCAN_RADIUS_METERS) {
                 val radius = calculateRadius(place)
@@ -112,36 +83,16 @@ object GeofenceManager {
                     .setCircularRegion(place.lat, place.lng, radius)
                     .setExpirationDuration(Geofence.NEVER_EXPIRE)
                     .setTransitionTypes(Geofence.GEOFENCE_TRANSITION_ENTER or Geofence.GEOFENCE_TRANSITION_DWELL)
-                    .setLoiteringDelay(5000)
+                    .setLoiteringDelay(1000) // Fast dwell trigger for simulation
                     .build()
                 geofenceList.add(g to dist)
             }
         }
 
-        // Add unenriched within SCAN_RADIUS
-        result.unenriched.forEach { place ->
-            val dist = haversineDistance(currentLat, currentLng, place.lat, place.lng)
-            if (dist * 1000 <= SCAN_RADIUS_METERS) {
-                val radius = calculateRadius(place)
-                val g = Geofence.Builder()
-                    .setRequestId(place.placeId)
-                    .setCircularRegion(place.lat, place.lng, radius)
-                    .setExpirationDuration(Geofence.NEVER_EXPIRE)
-                    .setTransitionTypes(Geofence.GEOFENCE_TRANSITION_ENTER or Geofence.GEOFENCE_TRANSITION_DWELL)
-                    .setLoiteringDelay(5000)
-                    .build()
-                geofenceList.add(g to dist)
-            }
-        }
+        val sorted = geofenceList.sortedBy { it.second }.take(MAX_GEOFENCES)
+        val toRegister = sorted.map { it.first }.toMutableList()
 
-        // Take top closest up to MAX_GEOFENCES
-        val finalGeofences = geofenceList
-            .sortedBy { it.second }
-            .take(MAX_GEOFENCES)
-            .map { it.first }
-            .toMutableList()
-
-        finalGeofences.add(
+        toRegister.add(
             Geofence.Builder()
                 .setRequestId(BOUNDARY_GEOFENCE_ID)
                 .setCircularRegion(currentLat, currentLng, BOUNDARY_RADIUS_METERS)
@@ -150,31 +101,34 @@ object GeofenceManager {
                 .build()
         )
 
-        Log.d("GeofenceManager", "Registering ${finalGeofences.size} geofences (Radius: 7km, Limit: $MAX_GEOFENCES, Trigger: 5km)")
-
-        if (finalGeofences.isEmpty()) return@withContext
-
-        val request = GeofencingRequest.Builder()
-            .setInitialTrigger(GeofencingRequest.INITIAL_TRIGGER_ENTER or GeofencingRequest.INITIAL_TRIGGER_DWELL)
-            .addGeofences(finalGeofences)
-            .build()
-
-        try {
-            getGeofencingClient(context).addGeofences(request, getPendingIntent(context))
-                .addOnSuccessListener {
-                    Log.d("GeofenceManager", "Registered ${finalGeofences.size} geofences successfully.")
-                }
-                .addOnFailureListener { e ->
-                    Log.e("GeofenceManager", "Failed to register geofences", e)
-                }
-        } catch (e: SecurityException) {
-            Log.e("GeofenceManager", "SecurityException during registration", e)
+        // Force clean removal before adding
+        getGeofencingClient(context).removeGeofences(getPendingIntent(context)).addOnCompleteListener {
+            if (toRegister.isEmpty()) return@addOnCompleteListener
+            
+            val request = GeofencingRequest.Builder()
+                .setInitialTrigger(GeofencingRequest.INITIAL_TRIGGER_ENTER or GeofencingRequest.INITIAL_TRIGGER_DWELL)
+                .addGeofences(toRegister)
+                .build()
+            
+            try {
+                getGeofencingClient(context).addGeofences(request, getPendingIntent(context))
+                    .addOnSuccessListener {
+                        DebugLogger.log(context, "Registered ${toRegister.size} POIs (3km boundary active)")
+                        // Log names of the closest 5 registered POIs for user visibility
+                        val names = sorted.take(5).joinToString(", ") { it.first.requestId }
+                        DebugLogger.log(context, "Closest POIs: $names")
+                    }
+                    .addOnFailureListener {
+                        DebugLogger.log(context, "Geofence Registration FAILED: ${it.message}")
+                    }
+            } catch (e: SecurityException) {
+                DebugLogger.log(context, "Security error in GeofenceManager")
+            }
         }
     }
 
     fun removeAll(context: Context) {
         getGeofencingClient(context).removeGeofences(getPendingIntent(context))
-            .addOnSuccessListener { Log.d("GeofenceManager", "All geofences removed") }
-            .addOnFailureListener { e -> Log.e("GeofenceManager", "Failed to remove geofences", e) }
+            .addOnSuccessListener { DebugLogger.log(context, "All geofences cleared") }
     }
 }

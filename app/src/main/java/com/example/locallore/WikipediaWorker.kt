@@ -19,13 +19,13 @@ class WikipediaWorker(
 ) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result {
-        Log.d("WikipediaWorker", "Starting Wikipedia enrichment job")
+        DebugLogger.log(applicationContext, "WikiWorker Started")
 
         return try {
             // Load places from cache
             val placesFile = File(applicationContext.filesDir, "nearby_attractions.json")
             if (!placesFile.exists()) {
-                Log.e("WikipediaWorker", "No places cache found, stopping")
+                DebugLogger.log(applicationContext, "WikiWorker: No Cache Found")
                 return Result.failure()
             }
 
@@ -33,7 +33,7 @@ class WikipediaWorker(
             val jsonArray = wrapper.getJSONArray("places")
             val cityName = wrapper.optString("cityName").ifBlank { null }
 
-            // Load progress file to know where we left off
+            // Load progress file
             val progressFile = File(applicationContext.filesDir, "wikipedia_progress.json")
             val processedIds = mutableSetOf<String>()
             if (progressFile.exists()) {
@@ -43,41 +43,36 @@ class WikipediaWorker(
                 }
             }
 
-            // Load existing results so we don't lose already enriched places
             val existingResult = WikipediaService.loadFromCache(applicationContext)
             val enriched = existingResult?.enriched?.toMutableList() ?: mutableListOf()
             val unenriched = existingResult?.unenriched?.toMutableList() ?: mutableListOf()
-
-            // Remove already processed from unenriched so we don't double add
             unenriched.removeAll { it.placeId in processedIds }
 
-            Log.d("WikipediaWorker", "Resuming from ${processedIds.size} already processed places")
+            DebugLogger.log(applicationContext, "Resuming enrichment (${processedIds.size} done)")
 
             var processedInThisSession = 0
             val batchSize = 6
 
             // Process remaining places
             for (i in 0 until jsonArray.length()) {
+                if (isStopped) {
+                    DebugLogger.log(applicationContext, "WikiWorker Stopped Manually.")
+                    return Result.success()
+                }
+
                 val obj = jsonArray.getJSONObject(i)
                 val placeId = obj.getString("placeId")
-
-                // Skip already processed
                 if (placeId in processedIds) continue
-                
-                // NEW: Skip if already present in enriched cache (from previous runs)
                 if (enriched.any { it.placeId == placeId }) {
-                    Log.d("WikipediaWorker", "Skipping ${obj.getString("name")}, already enriched in cache")
                     processedIds.add(placeId)
                     continue
                 }
 
-                // Batching logic: after every 6 attempts in this session, cool down
                 if (processedInThisSession > 0 && processedInThisSession % batchSize == 0) {
-                    Log.d("WikipediaWorker", "Batch limit ($batchSize) reached. Cooling down for 5s...")
+                    DebugLogger.log(applicationContext, "Wiki Cooling down (5s)...")
                     delay(5000)
                 }
 
-                // MARK: Use existing radius from place if available
                 val place = NearbyPlace(
                     name = obj.getString("name"),
                     placeId = placeId,
@@ -95,51 +90,40 @@ class WikipediaWorker(
                     viewportSouthwestLng = if (obj.isNull("viewportSWLng")) null else obj.optDouble("viewportSWLng")
                 )
 
-                // Try Wikipedia enrichment
                 val enrichedPlace = tryEnrichSingle(place, cityName)
                 processedInThisSession++
                 
                 if (enrichedPlace != null) {
                     enriched.add(enrichedPlace)
-                    Log.d("WikipediaWorker", "✅ Enriched: ${place.name}")
                 } else {
                     unenriched.add(place)
-                    Log.d("WikipediaWorker", "📍 Unenriched: ${place.name}")
                 }
 
-                // Mark as processed and save progress
                 processedIds.add(placeId)
                 val progressArray = JSONArray()
                 processedIds.forEach { progressArray.put(it) }
                 progressFile.writeText(progressArray.toString())
 
-                // Save results so far to cache after each place
-                WikipediaService.saveToCache(
-                    applicationContext,
-                    EnrichmentResult(enriched.toList(), unenriched.toList())
-                )
-
-                // Individual request delay
+                WikipediaService.saveToCache(applicationContext, EnrichmentResult(enriched.toList(), unenriched.toList()))
                 delay(500)
             }
 
-            // All done — delete progress file
             if (progressFile.exists()) progressFile.delete()
-            Log.d("WikipediaWorker", "Wikipedia enrichment complete! ${enriched.size} enriched, ${unenriched.size} unenriched")
+            DebugLogger.log(applicationContext, "Wiki Enrichment Complete! (${enriched.size} enriched)")
 
             // Update Geofences with the final enriched data
-            val finalResult = EnrichmentResult(enriched.toList(), unenriched.toList())
             val location = LocationService.getCurrentLocation(applicationContext)
             if (location != null) {
-                GeofenceManager.registerAll(applicationContext, finalResult, location.first, location.second)
-                Log.d("WikipediaWorker", "Geofences updated with final enriched data")
+                val (lat, lng) = location
+                val allPlaces = LocationService.loadAllPlacesFromCache(applicationContext) ?: emptyList()
+                GeofenceManager.registerAll(applicationContext, allPlaces, lat, lng)
             }
 
             Result.success()
 
         } catch (e: Exception) {
-            Log.e("WikipediaWorker", "Worker failed", e)
-            Result.retry() // WorkManager will retry automatically
+            DebugLogger.log(applicationContext, "Wiki Error: ${e.message}")
+            Result.retry()
         }
     }
 

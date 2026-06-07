@@ -39,7 +39,7 @@ data class NearbyPlace(
 
 object LocationService {
 
-    suspend fun getCityName(lat: Double, lng: Double): String? = withContext(Dispatchers.IO) {
+    suspend fun getCityName(lat: Double, lng: Double, context: Context): String? = withContext(Dispatchers.IO) {
         try {
             val url = "https://nominatim.openstreetmap.org/reverse?lat=$lat&lon=$lng&format=json"
             val request = Request.Builder()
@@ -52,67 +52,66 @@ object LocationService {
             val json = JSONObject(body)
             val address = json.getJSONObject("address")
 
-            // Try city first, then town, then state as fallback
             val city = address.optString("city").ifBlank { null }
                 ?: address.optString("town").ifBlank { null }
                 ?: address.optString("state").ifBlank { null }
 
-            Log.d("LocationService", "Detected city: $city")
+            DebugLogger.log(context, "City Detected: $city")
             city
 
         } catch (e: Exception) {
-            Log.e("LocationService", "Reverse geocode failed", e)
+            DebugLogger.log(context, "Geocode Failed: ${e.message}")
             null
         }
     }
+
     suspend fun getCurrentLocation(context: Context): Pair<Double, Double>? {
         val hasPermission = ContextCompat.checkSelfPermission(
             context, Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
 
         if (!hasPermission) {
-            Log.e("LocationService", "Location permission not granted")
+            DebugLogger.log(context, "Location permission missing")
             return null
         }
 
         val client = LocationServices.getFusedLocationProviderClient(context)
 
         return suspendCancellableCoroutine { cont ->
-            // Try getting a fresh current location instead of just the last known one
             val cts = CancellationTokenSource()
             client.getCurrentLocation(Priority.PRIORITY_HIGH_ACCURACY, cts.token)
                 .addOnSuccessListener { location ->
                     if (location != null) {
-                        Log.d("LocationService", "Got location: ${location.latitude}, ${location.longitude}")
                         if (cont.isActive) cont.resume(Pair(location.latitude, location.longitude))
                     } else {
-                        Log.e("LocationService", "Current location was null. Check emulator settings.")
+                        DebugLogger.log(context, "Current location null")
                         if (cont.isActive) cont.resume(null)
                     }
                 }
                 .addOnFailureListener {
-                    Log.e("LocationService", "Failed to get location", it)
+                    DebugLogger.log(context, "Location fetch failed")
                     if (cont.isActive) cont.resume(null)
                 }
 
-            cont.invokeOnCancellation {
-                cts.cancel()
-            }
+            cont.invokeOnCancellation { cts.cancel() }
         }
     }
 
     suspend fun getNearbyAttractions(
+        context: Context,
         lat: Double,
         lng: Double,
         apiKey: String
     ): List<NearbyPlace> = withContext(Dispatchers.IO) {
         val allPlaces = mutableListOf<NearbyPlace>()
         var nextPageToken: String? = null
+        
+        DebugLogger.log(context, "Fetching Google Places...")
 
         do {
             val url = StringBuilder("https://maps.googleapis.com/maps/api/place/nearbysearch/json" +
                     "?location=$lat,$lng" +
-                    "&radius=20000" +
+                    "&radius=15000" +
                     "&type=tourist_attraction" +
                     "&key=$apiKey")
 
@@ -149,20 +148,13 @@ object LocationService {
                     val southwestLat = viewport?.getJSONObject("southwest")?.optDouble("lat")
                     val southwestLng = viewport?.getJSONObject("southwest")?.optDouble("lng")
 
-                    // Skip permanently closed places
                     val businessStatus = place.optString("business_status", "OPERATIONAL")
-                    if (businessStatus == "CLOSED_PERMANENTLY") {
-                        Log.d("LocationService", "Skipping permanently closed: $name")
-                        continue
-                    }
+                    if (businessStatus == "CLOSED_PERMANENTLY") continue
 
-                    // Keyword filter
                     val nameLower = name.lowercase()
                     val isBlacklisted = blacklistKeywords.any { keyword ->
                         val regex = Regex("\\b${Regex.escape(keyword)}\\b", RegexOption.IGNORE_CASE)
-                        val matches = regex.containsMatchIn(nameLower)
-                        if (matches) Log.d("LocationService", "Filtered '$name' because of keyword: '$keyword'")
-                        matches
+                        regex.containsMatchIn(nameLower)
                     }
                     if (isBlacklisted) continue
 
@@ -202,23 +194,21 @@ object LocationService {
                 }
 
             } catch (e: Exception) {
-                Log.e("LocationService", "Places API call failed", e)
+                DebugLogger.log(context, "Google Places call failed")
                 break
             }
 
         } while (nextPageToken != null)
 
-        Log.d("LocationService", "Found ${allPlaces.size} attractions total")
+        DebugLogger.log(context, "Found ${allPlaces.size} attractions.")
         allPlaces
     }
 
     fun savePlacesToJson(context: Context, newPlaces: List<NearbyPlace>, lat: Double, lng: Double, cityName: String? = null) {
         try {
-            // Load existing places to merge
-            val existingPlaces = loadPlacesFromJson(context, lat, lng) ?: emptyList()
+            val existingPlaces = loadAllPlacesFromCache(context) ?: emptyList()
             val existingPlaceIds = existingPlaces.map { it.placeId }.toSet()
             
-            // Keep existing ones, add new ones that aren't already there
             val mergedPlaces = existingPlaces.toMutableList()
             newPlaces.forEach { if (it.placeId !in existingPlaceIds) mergedPlaces.add(it) }
 
@@ -251,9 +241,9 @@ object LocationService {
 
             val file = File(context.filesDir, "nearby_attractions.json")
             file.writeText(wrapper.toString(4))
-            Log.d("LocationService", "Saved ${mergedPlaces.size} total places to cache (merged ${newPlaces.size} new)")
+            DebugLogger.log(context, "Saved ${mergedPlaces.size} items to database.")
         } catch (e: Exception) {
-            Log.e("LocationService", "Failed to save places to JSON", e)
+            DebugLogger.log(context, "Failed to save to JSON")
         }
     }
 
@@ -267,12 +257,41 @@ object LocationService {
             val file = File(context.filesDir, fileName)
             if (file.exists()) {
                 if (file.delete()) {
-                    Log.d("LocationService", "Deleted cache file: $fileName")
+                    DebugLogger.log(context, "Deleted cache: $fileName")
                 }
             }
         }
-        // Also remove active geofences from the system so they don't persist
         GeofenceManager.removeAll(context)
+    }
+
+    fun loadAllPlacesFromCache(context: Context): List<NearbyPlace>? {
+        return try {
+            val file = File(context.filesDir, "nearby_attractions.json")
+            if (!file.exists()) return null
+            val wrapper = JSONObject(file.readText())
+            val jsonArray = wrapper.getJSONArray("places")
+            val places = mutableListOf<NearbyPlace>()
+            for (i in 0 until jsonArray.length()) {
+                val obj = jsonArray.getJSONObject(i)
+                places.add(NearbyPlace(
+                    name = obj.getString("name"),
+                    placeId = obj.getString("placeId"),
+                    lat = obj.getDouble("lat"),
+                    lng = obj.getDouble("lng"),
+                    rating = obj.optDouble("rating", 0.0),
+                    userRatingsTotal = obj.optInt("userRatingsTotal", 0),
+                    vicinity = obj.optString("vicinity", ""),
+                    openNow = if (obj.isNull("openNow")) null else obj.optBoolean("openNow"),
+                    photoReference = obj.optString("photoReference").ifBlank { null },
+                    businessStatus = obj.optString("businessStatus", "OPERATIONAL"),
+                    viewportNortheastLat = if (obj.isNull("viewportNELat")) null else obj.optDouble("viewportNELat"),
+                    viewportNortheastLng = if (obj.isNull("viewportNELng")) null else obj.optDouble("viewportNELng"),
+                    viewportSouthwestLat = if (obj.isNull("viewportSWLat")) null else obj.optDouble("viewportSWLat"),
+                    viewportSouthwestLng = if (obj.isNull("viewportSWLng")) null else obj.optDouble("viewportSWLng")
+                ))
+            }
+            places
+        } catch (e: Exception) { null }
     }
 
     fun loadPlacesFromJson(context: Context, currentLat: Double, currentLng: Double): List<NearbyPlace>? {
@@ -289,14 +308,12 @@ object LocationService {
             val distanceKm = haversineDistance(currentLat, currentLng, fetchedLat, fetchedLng)
 
             if (ageMinutes > 45) {
-                Log.d("LocationService", "Cache expired: ${ageMinutes} mins old. Clearing all.")
-                clearAllCaches(context)
+                DebugLogger.log(context, "Cache expired (45 mins)")
                 return null
             }
 
             if (distanceKm > 15) {
-                Log.d("LocationService", "Cache expired: moved ${distanceKm}km. Clearing all.")
-                clearAllCaches(context)
+                DebugLogger.log(context, "Cache moved >15km")
                 return null
             }
 
@@ -323,19 +340,14 @@ object LocationService {
                     )
                 )
             }
-
-            Log.d("LocationService", "Cache valid: ${ageMinutes} mins old, ${distanceKm}km away. Loaded ${places.size} places")
             places
-
         } catch (e: Exception) {
-            Log.e("LocationService", "Failed to load places from cache", e)
             null
         }
     }
 
-    // Calculates distance between two coordinates in km
     private fun haversineDistance(lat1: Double, lng1: Double, lat2: Double, lng2: Double): Double {
-        val R = 6371.0 // Earth's radius in km
+        val R = 6371.0
         val dLat = Math.toRadians(lat2 - lat1)
         val dLng = Math.toRadians(lng2 - lng1)
         val a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
