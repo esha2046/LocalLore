@@ -13,8 +13,12 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -51,14 +55,13 @@ class MainActivity : ComponentActivity() {
         }
         setContent {
             LocalLoreTheme {
-                Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
-                    MainScreen(context = this, modifier = Modifier.padding(innerPadding))
-                }
+                MainScreen(context = this)
             }
         }
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(context: Context, modifier: Modifier = Modifier) {
     val apiKey = BuildConfig.PLACES_API_KEY
@@ -66,10 +69,13 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
 
     // UI States
     var cityName by remember { mutableStateOf<String?>(null) }
-    var statusText by remember { mutableStateOf("Press to find nearby attractions") }
+    var statusText by remember { mutableStateOf("Ready to explore?") }
     var fetchedPlaces by remember { mutableStateOf<List<NearbyPlace>>(emptyList()) }
+    var enrichedMap by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     var showLogs by remember { mutableStateOf(false) }
     var logsText by remember { mutableStateOf("") }
+    var showOptions by remember { mutableStateOf(false) }
+    var selectedPlaceSummary by remember { mutableStateOf<Pair<String, String>?>(null) }
 
     // Permission Launchers
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -78,10 +84,10 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
         val fineGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] ?: false
         val coarseGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] ?: false
         if (fineGranted && coarseGranted) {
-            statusText = "Foreground location granted!"
+            statusText = "Location granted! Tap the map to fetch."
             DebugLogger.log(context, "Foreground Location Granted")
         } else {
-            statusText = "Basic location permissions denied."
+            statusText = "Location permissions denied."
         }
     }
 
@@ -89,91 +95,186 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
-            statusText = "Background location active!"
+            statusText = "Background tracking active."
             DebugLogger.log(context, "Background Location Granted")
-        } else {
-            statusText = "Background location denied."
         }
     }
 
-    // Startup Logic: Resume from cache
     LaunchedEffect(Unit) {
-        initAppDataFromCache(context, { cityName = it }, { fetchedPlaces = it }, { statusText = it })
+        initAppDataFromCache(
+            context,
+            onCitySet = { cityName = it },
+            onPlacesSet = { fetchedPlaces = it },
+            onEnrichedSet = { enrichedMap = it },
+            onStatusChange = { statusText = it }
+        )
     }
 
-    // Main UI Layout
-    Box(modifier = modifier.fillMaxSize()) {
-        Column(
-            modifier = Modifier.fillMaxSize().padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Text(statusText, modifier = Modifier.padding(bottom = 16.dp))
-            
-            Button(onClick = {
-                handleClearCache(context, scope) {
-                    fetchedPlaces = emptyList()
-                    statusText = it
-                }
-            }, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                Text("Clear Cache")
-            }
-
-            Button(onClick = {
-                handleFetchClick(
-                    context, scope, apiKey, permissionLauncher, backgroundPermissionLauncher,
-                    onCityDetected = { cityName = it },
-                    onPlacesUpdated = { fetchedPlaces = it },
-                    onStatusChange = { statusText = it }
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {
+                    Column {
+                        Text("LocalLore", style = MaterialTheme.typography.titleLarge)
+                        cityName?.let {
+                            Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.secondary)
+                        }
+                    }
+                },
+                actions = {
+                    IconButton(onClick = { showOptions = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "Options")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
                 )
-            }, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                Text("Fetch Nearby POIs")
+            )
+        },
+        floatingActionButton = {
+            ExtendedFloatingActionButton(
+                onClick = {
+                    handleFetchClick(
+                        context, scope, apiKey, permissionLauncher, backgroundPermissionLauncher,
+                        onCityDetected = { cityName = it },
+                        onPlacesUpdated = { fetchedPlaces = it },
+                        onEnrichedUpdated = { enrichedMap = it },
+                        onStatusChange = { statusText = it }
+                    )
+                },
+                icon = { Icon(Icons.Default.Refresh, contentDescription = null) },
+                text = { Text("Fetch Nearby") }
+            )
+        }
+    ) { padding ->
+        Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+            // Status Bar
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = statusText,
+                    modifier = Modifier.padding(8.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                )
             }
 
-            Button(onClick = {
-                val dbFile = java.io.File(context.filesDir, "nearby_attractions.json")
-                if (dbFile.exists()) {
-                    val count = fetchedPlaces.size
-                    val wikiCache = WikipediaService.loadFromCache(context)
-                    val enrichedCount = wikiCache?.enriched?.size ?: 0
-                    
-                    // Simple summary
-                    logsText = "Database: $count places total\n" +
-                            "Wikipedia: $enrichedCount enriched\n\n" +
-                            "Full List:\n" + 
-                            fetchedPlaces.joinToString("\n") { "- ${it.name}" }
-                    showLogs = true
-                } else {
-                    statusText = "No attractions in database yet."
+            if (fetchedPlaces.isEmpty()) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            Icons.Default.LocationOn,
+                            contentDescription = null,
+                            modifier = Modifier.size(64.dp),
+                            tint = MaterialTheme.colorScheme.outline
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text("No attractions loaded", color = MaterialTheme.colorScheme.outline)
+                    }
                 }
-            }, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                Text("Show All Attractions")
-            }
-
-            Button(onClick = {
-                handleEnrichmentClick(context, scope, fetchedPlaces, cityName) {
-                    statusText = it
+            } else {
+                LazyColumn(
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    items(fetchedPlaces) { place ->
+                        PlaceItem(
+                            place = place,
+                            summary = enrichedMap[place.placeId],
+                            onClick = { summary ->
+                                selectedPlaceSummary = place.name to (summary ?: "No Wikipedia summary available for this location yet.")
+                            }
+                        )
+                    }
                 }
-            }, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                Text("Manual Wiki Enrich")
-            }
-
-            Button(onClick = {
-                handleStopBackgroundWork(context) { statusText = it }
-            }, modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                Text("Stop Background Work")
-            }
-
-            Spacer(modifier = Modifier.height(32.dp))
-
-            Button(onClick = {
-                logsText = DebugLogger.getLogs(context)
-                showLogs = true
-            }, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)) {
-                Text("View Debug Logs")
             }
         }
 
+        // Summary Dialog
+        selectedPlaceSummary?.let { (title, summary) ->
+            AlertDialog(
+                onDismissRequest = { selectedPlaceSummary = null },
+                title = { Text(title) },
+                text = {
+                    Box(modifier = Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState())) {
+                        Text(summary, style = MaterialTheme.typography.bodyMedium)
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { selectedPlaceSummary = null }) { Text("Close") }
+                }
+            )
+        }
+
+        // Options Dialog
+        if (showOptions) {
+            AlertDialog(
+                onDismissRequest = { showOptions = false },
+                title = { Text("Settings & Maintenance") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                showOptions = false
+                                handleEnrichmentClick(context, scope, fetchedPlaces, cityName, { enrichedMap = it }) { statusText = it }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.AutoFixHigh, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Manual Wiki Enrich")
+                        }
+                        
+                        OutlinedButton(
+                            onClick = {
+                                showOptions = false
+                                handleStopBackgroundWork(context) { statusText = it }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Stop, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Stop Background Work")
+                        }
+
+                        OutlinedButton(
+                            onClick = {
+                                showOptions = false
+                                handleClearCache(context, scope) {
+                                    fetchedPlaces = emptyList()
+                                    statusText = it
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.DeleteSweep, contentDescription = null)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Clear All Caches")
+                        }
+
+                        TextButton(
+                            onClick = {
+                                showOptions = false
+                                logsText = DebugLogger.getLogs(context)
+                                showLogs = true
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("View Debug Logs")
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { showOptions = false }) { Text("Dismiss") }
+                }
+            )
+        }
+
+        // Logs Dialog
         if (showLogs) {
             AlertDialog(
                 onDismissRequest = { showLogs = false },
@@ -181,13 +282,13 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
                 text = {
                     Column {
                         Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                           TextButton(onClick = { 
-                               DebugLogger.clearLogs(context)
-                               logsText = "Logs cleared."
-                           }) { Text("Clear Logs") }
+                            TextButton(onClick = {
+                                DebugLogger.clearLogs(context)
+                                logsText = "Logs cleared."
+                            }) { Text("Clear Logs") }
                         }
                         Box(modifier = Modifier.height(400.dp).verticalScroll(rememberScrollState())) {
-                            Text(logsText, fontSize = 10.sp)
+                            Text(logsText, fontSize = 10.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
                         }
                     }
                 },
@@ -199,10 +300,70 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
     }
 }
 
+@Composable
+fun PlaceItem(place: NearbyPlace, summary: String?, onClick: (String?) -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+        onClick = { onClick(summary) }
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(place.name, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                    if (summary != null) {
+                        Icon(
+                            Icons.Default.AutoFixHigh,
+                            contentDescription = "Enriched",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+                Text(
+                    place.vicinity,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.Star,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        " ${place.rating} (${place.userRatingsTotal} reviews)",
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                    if (place.openNow == true) {
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            "OPEN NOW",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = androidx.compose.ui.graphics.Color(0xFF4CAF50)
+                        )
+                    }
+                }
+            }
+            Icon(
+                Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.outline
+            )
+        }
+    }
+}
+
 private suspend fun initAppDataFromCache(
     context: Context,
     onCitySet: (String?) -> Unit,
     onPlacesSet: (List<NearbyPlace>) -> Unit,
+    onEnrichedSet: (Map<String, String>) -> Unit,
     onStatusChange: (String) -> Unit
 ) {
     val location = LocationService.getCurrentLocation(context)
@@ -214,7 +375,17 @@ private suspend fun initAppDataFromCache(
         val cached = withContext(Dispatchers.IO) { LocationService.loadPlacesFromJson(context, lat, lng) }
         if (cached != null) {
             onPlacesSet(cached)
-            onStatusChange("Loaded ${cached.size} places from cache!")
+            
+            // Also load Wikipedia cache
+            val wikiCached = withContext(Dispatchers.IO) { WikipediaService.loadFromCache(context) }
+            if (wikiCached != null) {
+                val map = wikiCached.enriched.associate { it.placeId to it.wikipediaSummary }
+                onEnrichedSet(map)
+                onStatusChange("Loaded ${cached.size} places (Enriched ✅)")
+            } else {
+                onStatusChange("Loaded ${cached.size} places from cache!")
+            }
+            
             GeofenceManager.registerAll(context, cached, lat, lng)
             DebugLogger.log(context, "Geofences resumed from cache")
         } else {
@@ -252,6 +423,7 @@ private fun handleFetchClick(
     bgLauncher: ManagedActivityResultLauncher<String, Boolean>,
     onCityDetected: (String?) -> Unit,
     onPlacesUpdated: (List<NearbyPlace>) -> Unit,
+    onEnrichedUpdated: (Map<String, String>) -> Unit,
     onStatusChange: (String) -> Unit
 ) {
     if (!hasBasicLocation(context)) {
@@ -283,6 +455,12 @@ private fun handleFetchClick(
         val cached = withContext(Dispatchers.IO) { LocationService.loadPlacesFromJson(context, lat, lng) }
         if (cached != null) {
             onPlacesUpdated(cached)
+            
+            val wikiCached = withContext(Dispatchers.IO) { WikipediaService.loadFromCache(context) }
+            if (wikiCached != null) {
+                onEnrichedUpdated(wikiCached.enriched.associate { it.placeId to it.wikipediaSummary })
+            }
+
             onStatusChange("Loaded ${cached.size} places from cache!")
             GeofenceManager.registerAll(context, cached, lat, lng)
         } else {
@@ -304,6 +482,7 @@ private fun handleEnrichmentClick(
     scope: CoroutineScope,
     fetchedPlaces: List<NearbyPlace>,
     cityName: String?,
+    onEnrichedUpdated: (Map<String, String>) -> Unit,
     onStatusChange: (String) -> Unit
 ) {
     if (fetchedPlaces.isEmpty()) {
@@ -319,12 +498,18 @@ private fun handleEnrichmentClick(
         if (location != null) {
             val (lat, lng) = location
             if (cached != null) {
+                val map = cached.enriched.associate { it.placeId to it.wikipediaSummary }
+                onEnrichedUpdated(map)
                 GeofenceManager.registerAll(context, fetchedPlaces, lat, lng)
                 onStatusChange("Loaded from cache! Geofences active ✅")
             } else {
                 onStatusChange("Fetching Wikipedia data...")
                 val result = WikipediaService.enrichAndFilter(fetchedPlaces, cityName)
                 withContext(Dispatchers.IO) { WikipediaService.saveToCache(context, result) }
+                
+                val map = result.enriched.associate { it.placeId to it.wikipediaSummary }
+                onEnrichedUpdated(map)
+
                 GeofenceManager.registerAll(context, fetchedPlaces, lat, lng)
                 onStatusChange("Done! Enriched POIs active.")
             }
