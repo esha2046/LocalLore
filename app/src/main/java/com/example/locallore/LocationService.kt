@@ -304,13 +304,7 @@ object LocationService {
             val fetchedLat = wrapper.getDouble("fetchedLat")
             val fetchedLng = wrapper.getDouble("fetchedLng")
 
-            val ageMinutes = (System.currentTimeMillis() - timestamp) / 60000
             val distanceKm = haversineDistance(currentLat, currentLng, fetchedLat, fetchedLng)
-
-            if (ageMinutes > 45) {
-                DebugLogger.log(context, "Cache expired (45 mins)")
-                return null
-            }
 
             if (distanceKm > 15) {
                 DebugLogger.log(context, "Cache moved >15km")
