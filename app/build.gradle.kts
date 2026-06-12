@@ -31,6 +31,9 @@ android {
         }
         val placesApiKey = localProperties.getProperty("PLACES_API_KEY") ?: ""
         buildConfigField("String", "PLACES_API_KEY", "\"$placesApiKey\"")
+        
+        val geminiApiKey = localProperties.getProperty("GEMINI_API_KEY") ?: placesApiKey
+        buildConfigField("String", "GEMINI_API_KEY", "\"$geminiApiKey\"")
     }
 
     buildTypes {

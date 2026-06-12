@@ -44,6 +44,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.core.app.ActivityCompat
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.SpanStyle
+
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -84,6 +88,14 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
     var logsText by remember { mutableStateOf("") }
     var showOptions by remember { mutableStateOf(false) }
 
+    var selectedTab by remember { mutableIntStateOf(0) }
+    val tabs = listOf("Attractions", "History", "Culture")
+
+    var cityLore by remember { mutableStateOf<CityLore?>(null) }
+    var isLoadingCityLore by remember { mutableStateOf(false) }
+    var cityLoreError by remember { mutableStateOf<String?>(null) }
+    var loreRefreshTrigger by remember { mutableIntStateOf(0) }
+
     // Permission Launchers
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -118,6 +130,37 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
             onEnrichedSet = { enrichedMap = it },
             onStatusChange = { statusText = it }
         )
+    }
+
+    LaunchedEffect(cityName, loreRefreshTrigger) {
+        val city = cityName
+        if (city != null) {
+            isLoadingCityLore = true
+            cityLoreError = null
+            try {
+                val cached = withContext(Dispatchers.IO) { CityLoreService.loadFromCache(context, city) }
+                if (cached != null) {
+                    cityLore = cached
+                    isLoadingCityLore = false
+                    statusText = "Lore for $city loaded from cache!"
+                } else {
+                    statusText = "Calling Gemini for $city lore..."
+                    val geminiApiKey = BuildConfig.GEMINI_API_KEY
+                    val result = withContext(Dispatchers.IO) {
+                        CityLoreService.fetchAndCacheCityLore(context, city, geminiApiKey)
+                    }
+                    cityLore = result
+                    isLoadingCityLore = false
+                    statusText = "Lore for $city loaded from Gemini!"
+                }
+            } catch (e: Exception) {
+                cityLoreError = "Failed to load city lore: ${e.localizedMessage}"
+                isLoadingCityLore = false
+                statusText = "Gemini load failed: ${e.localizedMessage}"
+            }
+        } else {
+            cityLore = null
+        }
     }
 
     Scaffold(
@@ -161,26 +204,137 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
         Box(modifier = Modifier.padding(padding).fillMaxSize()) {
             Column(modifier = Modifier.fillMaxSize()) {
                 Surface(color = MaterialTheme.colorScheme.secondaryContainer, modifier = Modifier.fillMaxWidth()) {
-                    Text(text = statusText, modifier = Modifier.padding(8.dp), style = MaterialTheme.typography.labelMedium)
-                }
-
-                if (fetchedPlaces.isEmpty()) {
-                    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("No attractions loaded", color = MaterialTheme.colorScheme.outline)
-                    }
-                } else {
-                    LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                        items(fetchedPlaces) { place ->
-                            PlaceItem(
-                                place = place,
-                                summary = enrichedMap[place.placeId],
-                                apiKey = apiKey,
-                                onClick = { selectedPlace = place }
+                    Column {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = statusText,
+                                style = MaterialTheme.typography.labelMedium,
+                                modifier = Modifier.weight(1f)
+                            )
+                            val isRunning = isLoadingCityLore || 
+                                            statusText.contains("fetching", ignoreCase = true) || 
+                                            statusText.contains("checking", ignoreCase = true) || 
+                                            statusText.contains("enriching", ignoreCase = true)
+                            if (isRunning) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(16.dp),
+                                    strokeWidth = 2.dp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+                        val isRunning = isLoadingCityLore || 
+                                        statusText.contains("fetching", ignoreCase = true) || 
+                                        statusText.contains("checking", ignoreCase = true) || 
+                                        statusText.contains("enriching", ignoreCase = true)
+                        if (isRunning) {
+                            LinearProgressIndicator(
+                                modifier = Modifier.fillMaxWidth(),
+                                color = MaterialTheme.colorScheme.primary,
+                                trackColor = MaterialTheme.colorScheme.secondaryContainer
                             )
                         }
                     }
                 }
+
+                TabRow(selectedTabIndex = selectedTab) {
+                    tabs.forEachIndexed { index, title ->
+                        Tab(
+                            selected = selectedTab == index,
+                            onClick = { selectedTab = index },
+                            text = { Text(title) },
+                            icon = {
+                                when (index) {
+                                    0 -> Icon(Icons.Default.Place, contentDescription = null)
+                                    1 -> Icon(Icons.Default.History, contentDescription = null)
+                                    2 -> Icon(Icons.Default.Palette, contentDescription = null)
+                                }
+                            }
+                        )
+                    }
+                }
+
+                when (selectedTab) {
+                    0 -> {
+                        if (fetchedPlaces.isEmpty()) {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text("No attractions loaded", color = MaterialTheme.colorScheme.outline)
+                            }
+                        } else {
+                            LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                items(fetchedPlaces) { place ->
+                                    PlaceItem(
+                                        place = place,
+                                        summary = enrichedMap[place.placeId],
+                                        apiKey = apiKey,
+                                        onClick = { selectedPlace = place }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    1 -> {
+                        HistoryTabContent(
+                            cityName = cityName,
+                            cityLore = cityLore,
+                            isLoading = isLoadingCityLore,
+                            error = cityLoreError,
+                            onRetry = {
+                                val city = cityName
+                                if (city != null) {
+                                    scope.launch {
+                                        isLoadingCityLore = true
+                                        cityLoreError = null
+                                        try {
+                                            val geminiApiKey = BuildConfig.GEMINI_API_KEY
+                                            val result = withContext(Dispatchers.IO) {
+                                                CityLoreService.fetchAndCacheCityLore(context, city, geminiApiKey)
+                                            }
+                                            cityLore = result
+                                        } catch (e: Exception) {
+                                            cityLoreError = e.localizedMessage
+                                        } finally {
+                                            isLoadingCityLore = false
+                                        }
+                                    }
+                                }
+                            }
+                        )
+                    }
+                    2 -> {
+                        CultureTabContent(
+                            cityName = cityName,
+                            cityLore = cityLore,
+                            isLoading = isLoadingCityLore,
+                            error = cityLoreError,
+                            onRetry = {
+                                val city = cityName
+                                if (city != null) {
+                                    scope.launch {
+                                        isLoadingCityLore = true
+                                        cityLoreError = null
+                                        try {
+                                            val geminiApiKey = BuildConfig.GEMINI_API_KEY
+                                            val result = withContext(Dispatchers.IO) {
+                                                CityLoreService.fetchAndCacheCityLore(context, city, geminiApiKey)
+                                            }
+                                            cityLore = result
+                                        } catch (e: Exception) {
+                                            cityLoreError = e.localizedMessage
+                                        } finally {
+                                            isLoadingCityLore = false
+                                        }
+                                    }
+                                }
+                            }
+                        )
+                    }
+                }
             }
+
 
             // FULL SCREEN DETAIL OVERLAY
             AnimatedVisibility(
@@ -224,7 +378,24 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
 
                         OutlinedButton(onClick = { 
                             showOptions = false
-                            handleClearCache(context, scope) { fetchedPlaces = emptyList(); statusText = it } 
+                            scope.launch {
+                                withContext(Dispatchers.IO) {
+                                    CityLoreService.clearCaches(context)
+                                }
+                                cityLore = null
+                                loreRefreshTrigger++
+                                statusText = "City lore cache cleared."
+                            }
+                        }, modifier = Modifier.fillMaxWidth()) { Text("Clear City Lore Cache") }
+
+                        OutlinedButton(onClick = { 
+                            showOptions = false
+                            handleClearCache(context, scope) { 
+                                fetchedPlaces = emptyList()
+                                cityLore = null
+                                cityName = null
+                                statusText = it 
+                            } 
                         }, modifier = Modifier.fillMaxWidth()) { Text("Clear All Caches") }
 
                         TextButton(onClick = { 
@@ -427,6 +598,7 @@ private fun handleClearCache(context: Context, scope: CoroutineScope, onCleared:
     scope.launch {
         withContext(Dispatchers.IO) {
             LocationService.clearAllCaches(context)
+            CityLoreService.clearCaches(context)
             WorkManager.getInstance(context).cancelAllWork()
         }
         onCleared("Caches cleared.")
@@ -509,3 +681,296 @@ private fun handleStopBackgroundWork(context: Context, onStatusChange: (String) 
 
 private fun hasBasicLocation(context: Context) = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
 private fun hasBackgroundLocation(context: Context) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_BACKGROUND_LOCATION) == PackageManager.PERMISSION_GRANTED else true
+
+// City History & Culture Composables and Helpers
+
+sealed class LoreBlock {
+    data class Header(val text: String, val level: Int) : LoreBlock()
+    data class Paragraph(val text: String) : LoreBlock()
+    data class BulletItem(val text: String) : LoreBlock()
+}
+
+fun parseLoreText(text: String): List<LoreBlock> {
+    val lines = text.split("\n")
+    val blocks = mutableListOf<LoreBlock>()
+    for (line in lines) {
+        val trimmed = line.trim()
+        if (trimmed.isEmpty()) continue
+        
+        if (trimmed.startsWith("###")) {
+            blocks.add(LoreBlock.Header(trimmed.removePrefix("###").trim(), 3))
+        } else if (trimmed.startsWith("##")) {
+            blocks.add(LoreBlock.Header(trimmed.removePrefix("##").trim(), 2))
+        } else if (trimmed.startsWith("#")) {
+            blocks.add(LoreBlock.Header(trimmed.removePrefix("#").trim(), 1))
+        } else if (trimmed.startsWith("-") || trimmed.startsWith("*")) {
+            val content = trimmed.substring(1).trim()
+            blocks.add(LoreBlock.BulletItem(content))
+        } else {
+            blocks.add(LoreBlock.Paragraph(trimmed))
+        }
+    }
+    return blocks
+}
+
+fun parseBoldText(text: String) = buildAnnotatedString {
+    val parts = text.split("**")
+    parts.forEachIndexed { index, part ->
+        if (index % 2 == 1) {
+            withStyle(style = SpanStyle(fontWeight = FontWeight.Bold)) {
+                append(part)
+            }
+        } else {
+            append(part)
+        }
+    }
+}
+
+@Composable
+fun RenderLoreBlocks(blocks: List<LoreBlock>, modifier: Modifier = Modifier) {
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        blocks.forEach { block ->
+            when (block) {
+                is LoreBlock.Header -> {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = block.text,
+                        style = when (block.level) {
+                            1 -> MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold)
+                            2 -> MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            else -> MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.secondary)
+                        }
+                    )
+                }
+                is LoreBlock.Paragraph -> {
+                    Text(
+                        text = parseBoldText(block.text),
+                        style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 24.sp),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+                is LoreBlock.BulletItem -> {
+                    Row(
+                        modifier = Modifier.padding(start = 8.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Text("•  ", style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary))
+                        Text(
+                            text = parseBoldText(block.text),
+                            style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 24.sp),
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun EmptyLoreState(message: String) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            ),
+            shape = RoundedCornerShape(16.dp),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.LocationOn,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(48.dp)
+                )
+                Text(
+                    text = message,
+                    style = MaterialTheme.typography.bodyLarge.copy(lineHeight = 22.sp),
+                    textAlign = TextAlign.Center,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun LoadingLoreState(message: String) {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.outline
+            )
+        }
+    }
+}
+
+@Composable
+fun ErrorLoreState(message: String, onRetry: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Warning,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(48.dp)
+            )
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.error
+            )
+            Button(onClick = onRetry) {
+                Text("Retry")
+            }
+        }
+    }
+}
+
+@Composable
+fun HistoryTabContent(
+    cityName: String?,
+    cityLore: CityLore?,
+    isLoading: Boolean,
+    error: String?,
+    onRetry: () -> Unit
+) {
+    if (cityName == null) {
+        EmptyLoreState("Please detect your location or fetch nearby attractions to reveal local history!")
+        return
+    }
+    if (isLoading) {
+        LoadingLoreState("Channeling local tour guides for $cityName's history...")
+        return
+    }
+    if (error != null) {
+        ErrorLoreState(error, onRetry)
+        return
+    }
+    val historyText = cityLore?.historyGemini
+    if (historyText == null) {
+        EmptyLoreState("No history loaded. Click 'Fetch Nearby' to get history for $cityName.")
+        return
+    }
+
+    val blocks = remember(historyText) { parseLoreText(historyText) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+    ) {
+        // City Header Card
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer
+            )
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "$cityName Chronicles",
+                    style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                Text(
+                    text = "A fun journey through time ✨",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                )
+            }
+        }
+
+        RenderLoreBlocks(blocks)
+        Spacer(modifier = Modifier.height(100.dp)) // padding for floating action button
+    }
+}
+
+@Composable
+fun CultureTabContent(
+    cityName: String?,
+    cityLore: CityLore?,
+    isLoading: Boolean,
+    error: String?,
+    onRetry: () -> Unit
+) {
+    if (cityName == null) {
+        EmptyLoreState("Please detect your location or fetch nearby attractions to reveal local culture!")
+        return
+    }
+    if (isLoading) {
+        LoadingLoreState("Discovering local traditions & secret cuisines of $cityName...")
+        return
+    }
+    if (error != null) {
+        ErrorLoreState(error, onRetry)
+        return
+    }
+    val cultureText = cityLore?.cultureGemini
+    if (cultureText == null) {
+        EmptyLoreState("No culture lore loaded. Click 'Fetch Nearby' to get culture details for $cityName.")
+        return
+    }
+
+    val blocks = remember(cultureText) { parseLoreText(cultureText) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+    ) {
+        // City Header Card
+        Card(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.tertiaryContainer
+            )
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "$cityName's Soul",
+                    style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.onTertiaryContainer
+                )
+                Text(
+                    text = "Traditions, quirkiness, and local flavors 🍲",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.8f)
+                )
+            }
+        }
+
+        RenderLoreBlocks(blocks)
+        Spacer(modifier = Modifier.height(100.dp)) // padding for floating action button
+    }
+}
