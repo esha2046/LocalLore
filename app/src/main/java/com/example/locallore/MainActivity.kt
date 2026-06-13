@@ -47,11 +47,22 @@ import androidx.core.app.ActivityCompat
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.viewinterop.AndroidView
+import org.osmdroid.config.Configuration
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.MapView
+import org.osmdroid.views.overlay.Marker
 
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Initialize OSMDroid Configuration
+        Configuration.getInstance().load(this, getSharedPreferences("osmdroid", MODE_PRIVATE))
+        Configuration.getInstance().userAgentValue = packageName
+
         FirebaseAuth.getInstance().signInAnonymously()
             .addOnSuccessListener { DebugLogger.log(this, "Firebase connected ✅") }
         
@@ -87,6 +98,7 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
     var showLogs by remember { mutableStateOf(false) }
     var logsText by remember { mutableStateOf("") }
     var showOptions by remember { mutableStateOf(false) }
+    var isMapView by remember { mutableStateOf(false) }
 
     var selectedTab by remember { mutableIntStateOf(0) }
     val tabs = listOf("Attractions", "History", "Culture")
@@ -176,6 +188,12 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
                         }
                     },
                     actions = {
+                        IconButton(onClick = { isMapView = !isMapView }) {
+                            Icon(
+                                if (isMapView) Icons.Default.List else Icons.Default.Map,
+                                contentDescription = "Toggle View"
+                            )
+                        }
                         IconButton(onClick = { showOptions = true }) {
                             Icon(Icons.Default.MoreVert, contentDescription = "Options")
                         }
@@ -263,6 +281,12 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
                             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                 Text("No attractions loaded", color = MaterialTheme.colorScheme.outline)
                             }
+                        } else if (isMapView) {
+                            OSMMapView(
+                                places = fetchedPlaces,
+                                enrichedMap = enrichedMap,
+                                onMarkerClick = { place -> selectedPlace = place }
+                            )
                         } else {
                             LazyColumn(contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                 items(fetchedPlaces) { place ->
@@ -427,6 +451,47 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
             )
         }
     }
+}
+
+@Composable
+fun OSMMapView(
+    places: List<NearbyPlace>,
+    enrichedMap: Map<String, String>,
+    onMarkerClick: (NearbyPlace) -> Unit
+) {
+    AndroidView(
+        factory = { context ->
+            MapView(context).apply {
+                setTileSource(TileSourceFactory.MAPNIK)
+                setMultiTouchControls(true)
+                
+                val mapController = controller
+                mapController.setZoom(14.0)
+                
+                if (places.isNotEmpty()) {
+                    val startPoint = GeoPoint(places[0].lat, places[0].lng)
+                    mapController.setCenter(startPoint)
+                }
+
+                places.forEach { place ->
+                    val marker = Marker(this)
+                    marker.position = GeoPoint(place.lat, place.lng)
+                    marker.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                    marker.title = place.name
+                    marker.snippet = place.vicinity
+                    marker.setOnMarkerClickListener { _, _ ->
+                        onMarkerClick(place)
+                        true
+                    }
+                    overlays.add(marker)
+                }
+            }
+        },
+        modifier = Modifier.fillMaxSize(),
+        update = { mapView ->
+            // Update logic if needed when 'places' changes
+        }
+    )
 }
 
 @Composable
