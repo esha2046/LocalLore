@@ -27,33 +27,17 @@
 ## 🏗️ System Architecture
 
 ```mermaid
-graph TD
-    User([User Device]) --> GPS[Fused Location Provider]
-    GPS --> GeoManager[GeofenceManager]
+flowchart TD
+    A[📱 Android UI / Jetpack Compose] --> B[🎯 Geofence & Location Engine]
+    B -->|3km Boundary Exit| C[🔄 Dynamic 2-Tier Refresh]
+    B -->|Enter / Dwell POI| D[🔔 Proximity Notification]
     
-    subgraph Location & Geofence Engine
-        GeoManager -->|3km Outer Circle| Boundary[Boundary Geofence]
-        GeoManager -->|Nearest 40 POIs| POIFences[POI Geofences 350m-600m]
-        Boundary -->|Exit Event| Receiver[GeofenceBroadcastReceiver]
-        Receiver -->|3km - 15km| SoftRefresh[Soft Refresh from Cache]
-        Receiver -->|>= 15km| HardReset[Hard Reset & Places API Query]
-    end
+    C -->|New Region >= 15km| E[🌐 Google Places API]
+    C -->|City Lore Fetch| F[🤖 Google Gemini 2.5 Flash API]
     
-    subgraph Content & AI Pipeline
-        HardReset --> PlacesAPI[Google Places API]
-        HardReset --> WikiWorker[Wikipedia WorkManager]
-        Receiver -->|Dwell/Enter| Notif[Heads-Up Notification]
-        Notif --> UI[Compose Overlay]
-        
-        UI -->|City Changed| GeminiService[CityLoreService / Gemini API]
-        GeminiService -->|Gemini 2.5 Flash| HistoryCulture[History & Culture Lore]
-    end
-    
-    subgraph Data & Persistence
-        WikiWorker --> WikiCache[(wikipedia_progress.json)]
-        PlacesAPI --> PlacesCache[(nearby_attractions.json)]
-        GeminiService --> LoreCache[(city_lore_cityname.json)]
-    end
+    E --> G[💾 Offline JSON Cache]
+    F --> G
+    D -->|Tap Notification| A
 ```
 
 > 💡 **Scalability & Storage Considerations**
