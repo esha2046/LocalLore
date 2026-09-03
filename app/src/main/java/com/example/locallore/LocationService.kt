@@ -52,11 +52,15 @@ object LocationService {
             val json = JSONObject(body)
             val address = json.getJSONObject("address")
 
+            // Comprehensive city detection fallback
             val city = address.optString("city").ifBlank { null }
                 ?: address.optString("town").ifBlank { null }
+                ?: address.optString("village").ifBlank { null }
+                ?: address.optString("suburb").ifBlank { null }
+                ?: address.optString("county").ifBlank { null }
                 ?: address.optString("state").ifBlank { null }
 
-            DebugLogger.log(context, "City Detected: $city")
+            DebugLogger.log(context, "Location Resolved: $city")
             city
 
         } catch (e: Exception) {

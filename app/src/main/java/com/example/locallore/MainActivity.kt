@@ -147,6 +147,7 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
     LaunchedEffect(cityName, loreRefreshTrigger) {
         val city = cityName
         if (city != null) {
+            DebugLogger.log(context, "Lore LaunchedEffect triggered for: $city")
             isLoadingCityLore = true
             cityLoreError = null
             try {
@@ -166,6 +167,7 @@ fun MainScreen(context: Context, modifier: Modifier = Modifier) {
                     statusText = "Lore for $city loaded from Gemini!"
                 }
             } catch (e: Exception) {
+                DebugLogger.log(context, "Lore Load Failed: ${e.message}")
                 cityLoreError = "Failed to load city lore: ${e.localizedMessage}"
                 isLoadingCityLore = false
                 statusText = "Gemini load failed: ${e.localizedMessage}"

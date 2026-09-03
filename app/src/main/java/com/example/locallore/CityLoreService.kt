@@ -22,12 +22,11 @@ data class CityLore(
 object CityLoreService {
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-        .readTimeout(120, java.util.concurrent.TimeUnit.SECONDS)  // Gemini 2.5 Flash thinks!
+        .readTimeout(120, java.util.concurrent.TimeUnit.SECONDS)
         .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
         .build()
     private const val TAG = "CityLoreService"
 
-    // Load from cache file: city_lore_${cityName}.json
     fun loadFromCache(context: Context, cityName: String): CityLore? {
         return try {
             val sanitizedCity = cityName.lowercase().replace(Regex("[^a-z0-9]"), "_")
@@ -35,19 +34,20 @@ object CityLoreService {
             if (!file.exists()) return null
             
             val json = JSONObject(file.readText())
-            CityLore(
+            val lore = CityLore(
                 cityName = json.getString("cityName"),
                 timestamp = json.getLong("timestamp"),
                 historyGemini = json.optString("historyGemini").ifBlank { null },
                 cultureGemini = json.optString("cultureGemini").ifBlank { null }
             )
+            DebugLogger.log(context, "Loaded city lore for $cityName from disk.")
+            lore
         } catch (e: Exception) {
             Log.e(TAG, "Error loading cache", e)
             null
         }
     }
 
-    // Save to cache
     fun saveToCache(context: Context, lore: CityLore) {
         try {
             val sanitizedCity = lore.cityName.lowercase().replace(Regex("[^a-z0-9]"), "_")
@@ -65,7 +65,6 @@ object CityLoreService {
         }
     }
 
-    // Clear caches
     fun clearCaches(context: Context) {
         try {
             val files = context.filesDir.listFiles { _, name -> name.startsWith("city_lore_") }
@@ -79,22 +78,21 @@ object CityLoreService {
         }
     }
 
-    // Main fetch & cache
     suspend fun fetchAndCacheCityLore(context: Context, cityName: String, geminiApiKey: String): CityLore = withContext(Dispatchers.IO) {
-        DebugLogger.log(context, "Fetching Gemini lore for $cityName...")
+        DebugLogger.log(context, "Starting Gemini fetch for $cityName...")
         
         if (geminiApiKey.isBlank()) {
-            throw Exception("Gemini API Key is blank. Please configure GEMINI_API_KEY in local.properties.")
+            throw Exception("Gemini API Key is blank.")
         }
 
-        val historyGemini = fetchHistoryFromGemini(context, cityName, geminiApiKey)
-        val cultureGemini = fetchCultureFromGemini(context, cityName, geminiApiKey)
+        val history = fetchHistoryFromGemini(context, cityName, geminiApiKey)
+        val culture = fetchCultureFromGemini(context, cityName, geminiApiKey)
 
         val lore = CityLore(
             cityName = cityName,
             timestamp = System.currentTimeMillis(),
-            historyGemini = historyGemini,
-            cultureGemini = cultureGemini
+            historyGemini = history,
+            cultureGemini = culture
         )
         saveToCache(context, lore)
         lore
@@ -105,9 +103,8 @@ object CityLoreService {
             Act as an engaging but informative local historian. 
             Tell me the history of the city of $cityName in a clean, narrative, and structured style. 
             Focus on key historical milestones, founding era, growth, and major events. 
-            Keep it interesting, but prioritize accurate factual details and clarity.
             Break it down with clear subheadings starting with ## or ###. 
-            Keep it around 300-400 words. Do not use overexcited slang or excessive exclamation marks.
+            Keep it around 300-400 words.
         """.trimIndent()
         return queryGemini(context, prompt, apiKey)
     }
@@ -116,26 +113,24 @@ object CityLoreService {
         val prompt = """
             Act as a knowledgeable and engaging local cultural guide. 
             Describe the culture of $cityName in an informative, structured, and clear way. 
-            Focus heavily on:
-            1. Unique local traditions, celebrations, festivals, or cultural quirks of the residents.
-            2. Local cuisines (NOT hotels, restaurants, cafes, or dining spots. Focus strictly on local dishes, foods, drinks, and culinary history/flavors unique to $cityName or its immediate region).
-            Provide interesting context, but prioritize accurate, localized information and clarity.
+            Focus heavily on unique local traditions, celebrations, and local cuisines unique to $cityName.
             Break it down with clear subheadings starting with ## or ###. 
-            Keep it around 300-400 words. Do not use overexcited slang, excessive exclamation marks, or emoji-overload.
+            Keep it around 300-400 words.
         """.trimIndent()
         return queryGemini(context, prompt, apiKey)
     }
 
     private suspend fun queryGemini(context: Context, prompt: String, apiKey: String): String {
         val configs = listOf(
-            Pair("v1beta", "gemini-2.5-flash"),
-            Pair("v1", "gemini-1.5-flash"),
-            Pair("v1beta", "gemini-1.5-flash")
+            Pair("v1beta", "gemini-2.5-flash"), // Corrected name for the latest lite model
+            Pair("v1beta", "gemini-2.5-flash-lite"),
+            Pair("v1", "gemini-2.0-flash")
         )
         var lastException: Exception? = null
 
         for ((version, model) in configs) {
             try {
+                DebugLogger.log(context, "Trying Gemini $model ($version)...")
                 val mediaType = "application/json; charset=utf-8".toMediaType()
                 val jsonReq = JSONObject().apply {
                     put("contents", JSONArray().apply {
@@ -155,38 +150,28 @@ object CityLoreService {
                     .build()
 
                 val response = client.newCall(request).execute()
+                val responseStr = response.body?.string()
+
                 if (!response.isSuccessful) {
-                    val errorBody = response.body?.string() ?: "No error body"
-                    var cleanErrorMessage = errorBody
-                    try {
-                        val errJson = JSONObject(errorBody)
-                        val errorObj = errJson.optJSONObject("error")
-                        if (errorObj != null) {
-                            cleanErrorMessage = errorObj.optString("message", errorBody)
-                        }
-                    } catch (e: Exception) {}
-                    
-                    throw Exception(cleanErrorMessage)
+                    val errorMsg = responseStr ?: "No error body"
+                    throw Exception("HTTP ${response.code}: $errorMsg")
                 }
-                val resStr = response.body?.string() ?: throw Exception("Empty response body from Gemini")
-                val json = JSONObject(resStr)
-                val candidates = json.optJSONArray("candidates")
-                if (candidates != null && candidates.length() > 0) {
-                    val candidate = candidates.getJSONObject(0)
-                    val content = candidate.optJSONObject("content")
-                    if (content != null) {
-                        val parts = content.optJSONArray("parts")
-                        if (parts != null && parts.length() > 0) {
-                            return parts.getJSONObject(0).getString("text")
-                        }
-                    }
-                }
-                throw Exception("Gemini API response candidate parsing failed.")
+
+                val json = JSONObject(responseStr ?: throw Exception("Empty response"))
+                val text = json.getJSONArray("candidates")
+                    .getJSONObject(0)
+                    .getJSONObject("content")
+                    .getJSONArray("parts")
+                    .getJSONObject(0)
+                    .getString("text")
+
+                if (text.isNotBlank()) return text
+                
             } catch (e: Exception) {
                 lastException = e
-                DebugLogger.log(context, "Gemini $version ($model) query failed: ${e.message}")
+                DebugLogger.log(context, "Gemini $model failed: ${e.message}")
             }
         }
-        throw lastException ?: Exception("Unknown error querying Gemini API")
+        throw lastException ?: Exception("Unknown Gemini error")
     }
 }
